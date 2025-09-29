@@ -1,8 +1,8 @@
-import { Typography, Alert, Space, Row, Col, Card, Modal, Tag, Layout } from 'antd'
+import { Typography, Alert, Space, Row, Col, Card, Modal, Tag, Layout, Spin } from 'antd'
 import { CheckCircleTwoTone } from '@ant-design/icons'
 import { useWebSocket } from './hooks/useWebSocket'
 import { WebRTCManager } from './utils/webrtc'
-import { useRef, useEffect, useState, useCallback } from 'react'
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 
 const { Text } = Typography
 
@@ -20,6 +20,8 @@ function App() {
   const attachRetryRef = useRef<number | null>(null)
   const requestedDeviceRef = useRef<string | null>(null)
   const pendingRequestRef = useRef<string | null>(null)
+  const [videoSize, setVideoSize] = useState<{ width: number; height: number } | null>(null)
+  const [isStreamReady, setIsStreamReady] = useState(false)
 
   // WebSocket connection
   const {
@@ -92,6 +94,8 @@ function App() {
       } as any)
       requestedDeviceRef.current = deviceId
       console.log('[WEB][Request] REQUEST_STREAM sent for', deviceId)
+      setIsStreamReady(false)
+      setVideoSize(null)
     } catch (error) {
       console.error('[WEB][Request] Failed to request stream', error)
     }
@@ -131,6 +135,8 @@ function App() {
       if (pendingRequestRef.current === currentId) {
         pendingRequestRef.current = null
       }
+      setIsStreamReady(false)
+      setVideoSize(null)
     }
   }, [selectedDeviceId, isConnected, sendMessage])
 
@@ -168,6 +174,8 @@ function App() {
           if (pendingRequestRef.current === wentOfflineId) {
             pendingRequestRef.current = null
           }
+          setIsStreamReady(false)
+          setVideoSize(null)
         }
         break
       }
@@ -198,6 +206,8 @@ function App() {
           if (pendingRequestRef.current === message.deviceId) {
             pendingRequestRef.current = null
           }
+          setIsStreamReady(false)
+          setVideoSize(null)
         }
         break
     }
@@ -322,6 +332,10 @@ function App() {
     const stream = webrtcManagerRef.current?.getRemoteStream(deviceId) || null
     setRemoteStream(stream)
     setIsModalOpen(true)
+    setIsStreamReady(!!stream)
+    if (stream && videoRef.current?.videoWidth && videoRef.current?.videoHeight) {
+      setVideoSize({ width: videoRef.current.videoWidth, height: videoRef.current.videoHeight })
+    }
   }
 
   function closeDeviceModal() {
@@ -329,7 +343,63 @@ function App() {
     setRemoteStream(null)
     setSelectedDeviceId(null)
     pendingRequestRef.current = null
+    setIsStreamReady(false)
+    setVideoSize(null)
   }
+
+  useEffect(() => {
+    if (!remoteStream) {
+      setIsStreamReady(false)
+      setVideoSize(null)
+    }
+    if (remoteStream) {
+      const [track] = remoteStream.getVideoTracks()
+      if (track && typeof track.getSettings === 'function') {
+        const settings = track.getSettings()
+        if (settings.width && settings.height) {
+          setVideoSize({ width: settings.width, height: settings.height })
+        }
+      }
+    }
+  }, [remoteStream])
+
+  const renderedVideoSize = useMemo(() => {
+    if (!videoSize) return null
+    const maxWidth = window.innerWidth * 0.9
+    const maxHeight = window.innerHeight * 0.8
+    const scale = Math.min(maxWidth / videoSize.width, maxHeight / videoSize.height, 1)
+    return {
+      width: Math.round(videoSize.width * scale),
+      height: Math.round(videoSize.height * scale)
+    }
+  }, [videoSize])
+
+  const displayWidth = renderedVideoSize?.width ?? videoSize?.width ?? 320
+  const displayHeight = renderedVideoSize?.height ?? videoSize?.height ?? 568
+
+  const handleVideoClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!selectedDeviceId || !videoSize) return
+    const bounds = (event.currentTarget as HTMLDivElement).getBoundingClientRect()
+    const xRatio = (event.clientX - bounds.left) / bounds.width
+    const yRatio = (event.clientY - bounds.top) / bounds.height
+    const x = Math.round(videoSize.width * xRatio)
+    const y = Math.round(videoSize.height * yRatio)
+    try {
+      sendMessage({
+        type: 'CONTROL_COMMAND',
+        deviceId: selectedDeviceId,
+        data: {
+          type: 'TAP',
+          x,
+          y,
+          durationMs: 100
+        }
+      } as any)
+      console.log('[WEB][Control] TAP sent to', selectedDeviceId, x, y)
+    } catch (error) {
+      console.error('[WEB][Control] Failed to send tap', error)
+    }
+  }, [selectedDeviceId, videoSize, sendMessage])
 
   // Web không còn quyền Disconnect. Việc ngắt/kết nối do Android quản lý.
 
@@ -405,6 +475,9 @@ function App() {
                     // Attach and play
                     // @ts-ignore
                     videoRef.current.srcObject = stream
+                    if (videoRef.current.videoWidth && videoRef.current.videoHeight) {
+                      setVideoSize({ width: videoRef.current.videoWidth, height: videoRef.current.videoHeight })
+                    }
                     console.log('[WEB][Video] srcObject attached')
                     videoRef.current.play()
                       .then(() => console.log('[WEB][Video] play() resolved'))
@@ -457,28 +530,49 @@ function App() {
           <div style={{ display: 'flex', justifyContent: 'center', position: 'relative' }}>
             <div
               style={{
-                height: '80vh',
-                aspectRatio: '9 / 16',
                 background: '#000',
                 position: 'relative',
-                overflow: 'hidden'
+                overflow: 'hidden',
+                minWidth: displayWidth,
+                minHeight: displayHeight,
+                width: displayWidth,
+                height: displayHeight,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: isStreamReady ? 'pointer' : 'default'
               }}
+              onClick={isStreamReady ? handleVideoClick : undefined}
             >
+              {!isStreamReady && (
+                <div style={{ color: '#fff' }}>
+                  <Spin tip="Đang chờ thiết bị..." size="large" />
+                </div>
+              )}
               <video
                 ref={videoRef}
                 autoPlay
                 playsInline
                 muted
                 style={{
+                  display: isStreamReady ? 'block' : 'none',
                   width: '100%',
                   height: '100%',
-                  objectFit: 'contain',
-                  position: 'absolute',
-                  top: 0,
-                  left: 0
+                  objectFit: 'contain'
                 }}
-                onLoadedMetadata={() => console.log('[WEB][Video] loadedmetadata, readyState=', videoRef.current?.readyState)}
-                onPlay={() => console.log('[WEB][Video] onPlay, readyState=', videoRef.current?.readyState)}
+                onLoadedMetadata={() => {
+                  console.log('[WEB][Video] loadedmetadata, readyState=', videoRef.current?.readyState)
+                  if (videoRef.current?.videoWidth && videoRef.current?.videoHeight) {
+                    setVideoSize({ width: videoRef.current.videoWidth, height: videoRef.current.videoHeight })
+                  }
+                }}
+                onPlay={() => {
+                  console.log('[WEB][Video] onPlay, readyState=', videoRef.current?.readyState)
+                  if (videoRef.current?.videoWidth && videoRef.current?.videoHeight) {
+                    setVideoSize({ width: videoRef.current.videoWidth, height: videoRef.current.videoHeight })
+                  }
+                  setIsStreamReady(true)
+                }}
                 onPause={() => console.log('[WEB][Video] onPause')}
                 onError={(e) => console.error('[WEB][Video] onError', e)}
               />

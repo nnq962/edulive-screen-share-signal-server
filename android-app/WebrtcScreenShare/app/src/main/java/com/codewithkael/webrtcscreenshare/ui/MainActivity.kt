@@ -5,6 +5,7 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.util.Log
+import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import com.codewithkael.webrtcscreenshare.databinding.ActivityMainBinding
@@ -81,6 +82,16 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
                         views.toggleConnectionBtn.text = "Disconnect"
                     }
                 }.start()
+            }
+        }
+
+        views.accessibilitySettingsBtn.setOnClickListener {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            try {
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.e("EDU_SCREEN", "❌ Failed to open accessibility settings: ${e.message}", e)
             }
         }
 

@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">WebrtcScreenShare</string>
+    <string name="accessibility_service_description">Cho phép điều khiển thiết bị từ xa thông qua dịch vụ truy cập</string>
 </resources>

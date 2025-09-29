@@ -3,6 +3,7 @@ package com.codewithkael.webrtcscreenshare.webrtc
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjection
+import android.os.Build
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
@@ -92,13 +93,23 @@ class WebrtcClient @Inject constructor(
     fun startScreenCapturing(view:SurfaceViewRenderer){
         Log.d("EDU_SCREEN", "=== START SCREEN CAPTURING ===")
         try {
-            val displayMetrics = DisplayMetrics()
-            val windowsManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            windowsManager.defaultDisplay.getMetrics(displayMetrics)
+            val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-            val screenWidthPixels = displayMetrics.widthPixels
-            val screenHeightPixels = displayMetrics.heightPixels
-            Log.d("EDU_SCREEN", "📱 Screen size: ${screenWidthPixels}x${screenHeightPixels}")
+            val realMetrics = DisplayMetrics()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                windowManager.defaultDisplay.getRealMetrics(realMetrics)
+            } else {
+                windowManager.defaultDisplay.getMetrics(realMetrics)
+            }
+            val realWidth = realMetrics.widthPixels
+            val realHeight = realMetrics.heightPixels
+
+            val appMetrics = DisplayMetrics()
+            windowManager.defaultDisplay.getMetrics(appMetrics)
+            Log.d(
+                "EDU_SCREEN",
+                "📱 Screen size (physical): ${realWidth}x${realHeight} | app window: ${appMetrics.widthPixels}x${appMetrics.heightPixels}"
+            )
 
             Log.d("EDU_SCREEN", "🔄 Creating surface texture helper")
             val surfaceTextureHelper = SurfaceTextureHelper.create(
@@ -110,7 +121,7 @@ class WebrtcClient @Inject constructor(
             Log.d("EDU_SCREEN", "🔄 Initializing screen capturer")
             screenCapturer!!.initialize(surfaceTextureHelper,context,localVideoSource.capturerObserver)
             Log.d("EDU_SCREEN", "🔄 Starting screen capture")
-            screenCapturer!!.startCapture(screenWidthPixels,screenHeightPixels,15)
+            screenCapturer!!.startCapture(realWidth,realHeight,15)
 
             Log.d("EDU_SCREEN", "🔄 Creating video track")
             localVideoTrack = peerConnectionFactory.createVideoTrack(localTrackId+"_video",localVideoSource)

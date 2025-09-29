@@ -4,8 +4,10 @@ import android.content.Intent
 import android.util.Log
 import com.codewithkael.webrtcscreenshare.socket.SocketClient
 import com.codewithkael.webrtcscreenshare.utils.DataModel
+import com.codewithkael.webrtcscreenshare.utils.RemoteControlCommand
 import com.codewithkael.webrtcscreenshare.webrtc.MyPeerObserver
 import com.codewithkael.webrtcscreenshare.webrtc.WebrtcClient
+import com.codewithkael.webrtcscreenshare.service.RemoteControlAccessibilityService
 import com.google.gson.Gson
 import org.webrtc.*
 import javax.inject.Inject
@@ -245,6 +247,17 @@ class MainRepository @Inject constructor(
             }
             "STOP_STREAM" -> {
                 stopStreamingForViewer(model.viewerId)
+            }
+            "CONTROL_COMMAND" -> {
+                model.data?.let { payload ->
+                    try {
+                        val json = gson.toJson(payload)
+                        val command = gson.fromJson(json, RemoteControlCommand::class.java)
+                        RemoteControlAccessibilityService.dispatchCommand(command)
+                    } catch (e: Exception) {
+                        Log.e("EDU_SCREEN", "❌ Error parsing control command: ${e.message}", e)
+                    }
+                }
             }
             else -> Unit
         }

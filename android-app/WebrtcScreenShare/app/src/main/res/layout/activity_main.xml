@@ -10,7 +10,7 @@
     <androidx.cardview.widget.CardView
         android:id="@+id/statusLayout"
         android:layout_width="match_parent"
-        android:layout_height="80dp"
+        android:layout_height="160dp"
         android:layout_margin="8dp"
         android:background="#ffffff"
         android:elevation="4dp"
@@ -67,6 +67,20 @@
                 app:layout_constraintTop_toTopOf="parent"
                 app:layout_constraintBottom_toBottomOf="parent"
                 app:layout_constraintEnd_toEndOf="parent" />
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/accessibilitySettingsBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="100dp"
+                android:text="Accessibility"
+                android:textAllCaps="false"
+                android:backgroundTint="#4CAF50"
+                android:textColor="@android:color/white"
+                android:layout_marginTop="8dp"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/toggleConnectionBtn" />
+
 
         </androidx.constraintlayout.widget.ConstraintLayout>
     </androidx.cardview.widget.CardView>

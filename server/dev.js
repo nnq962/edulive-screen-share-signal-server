@@ -51,6 +51,7 @@ const MessageTypes = {
   VIEWER_LEAVE: 'VIEWER_LEAVE',
   REQUEST_STREAM: 'REQUEST_STREAM',
   STOP_STREAM: 'STOP_STREAM',
+  CONTROL_COMMAND: 'CONTROL_COMMAND',
   
   // WebRTC signaling
   OFFER: 'OFFER',
@@ -132,6 +133,10 @@ function handleMessage(ws, message) {
       handleStopStream(ws, message);
       break;
       
+    case MessageTypes.CONTROL_COMMAND:
+      handleControlCommand(ws, message);
+      break;
+
     case MessageTypes.OFFER:
       handleOffer(ws, message);
       break;
@@ -351,6 +356,48 @@ function handleStopStream(ws, message) {
     console.log(`🛑 Stream stop requested by viewer ${viewerId} for device ${deviceId}`);
   } catch (error) {
     console.error(`❌ Failed to forward stop request to device ${deviceId}:`, error.message);
+  }
+}
+
+function handleControlCommand(ws, message) {
+  const { deviceId, data } = message;
+  if (!deviceId || !data) {
+    sendError(ws, 'Missing deviceId or command payload in CONTROL_COMMAND');
+    return;
+  }
+
+  const viewerId = getViewerIdByConnection(ws);
+  if (!viewerId) {
+    sendError(ws, 'Viewer not registered');
+    return;
+  }
+
+  const viewer = viewers.get(viewerId);
+  if (!viewer) {
+    sendError(ws, 'Viewer session not found');
+    return;
+  }
+
+  if (!viewer.activeDevices.has(deviceId)) {
+    sendError(ws, 'Viewer not subscribed to device');
+    return;
+  }
+
+  const device = devices.get(deviceId);
+  if (!device) {
+    sendError(ws, 'Target device not found');
+    return;
+  }
+
+  try {
+    device.connection.send(JSON.stringify({
+      type: MessageTypes.CONTROL_COMMAND,
+      data,
+      viewerId
+    }));
+    console.log(`🎮 Control command forwarded from viewer ${viewerId} to device ${deviceId}`);
+  } catch (error) {
+    console.error(`❌ Failed to forward control command to device ${deviceId}:`, error.message);
   }
 }
 
