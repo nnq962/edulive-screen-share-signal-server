@@ -111,6 +111,17 @@ class WebrtcClient @Inject constructor(
                 "📱 Screen size (physical): ${realWidth}x${realHeight} | app window: ${appMetrics.widthPixels}x${appMetrics.heightPixels}"
             )
 
+            socketClient.sendMessageToSocket(
+                DataModel(
+                    type = "DEVICE_SCREEN_INFO",
+                    deviceId = username,
+                    data = mapOf(
+                        "width" to realWidth,
+                        "height" to realHeight
+                    )
+                )
+            )
+
             Log.d("EDU_SCREEN", "🔄 Creating surface texture helper")
             val surfaceTextureHelper = SurfaceTextureHelper.create(
                 Thread.currentThread().name,eglBaseContext

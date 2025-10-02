@@ -62,6 +62,7 @@ const MessageTypes = {
   DEVICE_STATUS: 'DEVICE_STATUS',
   DEVICES_LIST: 'DEVICES_LIST',
   HEARTBEAT: 'HEARTBEAT',
+  DEVICE_SCREEN_INFO: 'DEVICE_SCREEN_INFO',
   
   // Admin actions removed (server always welcome)
   
@@ -132,7 +133,11 @@ function handleMessage(ws, message) {
     case MessageTypes.STOP_STREAM:
       handleStopStream(ws, message);
       break;
-      
+
+    case MessageTypes.DEVICE_SCREEN_INFO:
+      handleDeviceScreenInfo(ws, message);
+      break;
+
     case MessageTypes.CONTROL_COMMAND:
       handleControlCommand(ws, message);
       break;
@@ -182,7 +187,9 @@ function handleDeviceRegister(ws, message) {
       type: deviceInfo.type || previousInfo?.type || 'android',
       isConnected: true,
       lastSeen: Date.now(),
-      isStreaming: previousInfo?.isStreaming ?? false
+      isStreaming: previousInfo?.isStreaming ?? false,
+      screenWidth: deviceInfo.screenWidth || previousInfo?.screenWidth || null,
+      screenHeight: deviceInfo.screenHeight || previousInfo?.screenHeight || null
     },
     stream: null
   });
@@ -395,10 +402,40 @@ function handleControlCommand(ws, message) {
       data,
       viewerId
     }));
-    console.log(`🎮 Control command forwarded from viewer ${viewerId} to device ${deviceId}`);
+    console.log(`🎮 Control command forwarded from viewer ${viewerId} to device ${deviceId}:`, data);
   } catch (error) {
     console.error(`❌ Failed to forward control command to device ${deviceId}:`, error.message);
   }
+}
+
+function handleDeviceScreenInfo(ws, message) {
+  const { deviceId, data } = message;
+  if (!deviceId || !data) {
+    sendError(ws, 'Missing deviceId or data in DEVICE_SCREEN_INFO');
+    return;
+  }
+
+  const device = devices.get(deviceId);
+  if (!device) {
+    sendError(ws, 'Device not found for DEVICE_SCREEN_INFO');
+    return;
+  }
+
+  device.deviceInfo.screenWidth = data.width;
+  device.deviceInfo.screenHeight = data.height;
+
+  broadcastToViewers({
+    type: MessageTypes.DEVICE_STATUS,
+    device: device.deviceInfo
+  });
+
+  broadcastToViewers({
+    type: MessageTypes.DEVICE_SCREEN_INFO,
+    deviceId,
+    data
+  });
+
+  console.log(`🖥️ Device ${deviceId} screen info updated: ${data.width}x${data.height}`);
 }
 
 function getViewerIdByConnection(ws) {

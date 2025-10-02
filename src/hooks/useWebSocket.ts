@@ -134,6 +134,26 @@ export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn =
               }
             } catch {}
               break;
+
+            case MessageTypes.DEVICE_SCREEN_INFO:
+              if (message.deviceId && message.data) {
+                setDevices(prev => prev.map(device => {
+                  if (device.id === message.deviceId) {
+                    return {
+                      ...device,
+                      screenWidth: message.data.width,
+                      screenHeight: message.data.height
+                    } as DeviceInfo;
+                  }
+                  return device;
+                }));
+                callbacksRef.current.onMessage?.({
+                  type: MessageTypes.DEVICE_SCREEN_INFO,
+                  deviceId: message.deviceId,
+                  data: message.data
+                } as any);
+              }
+              break;
               
             case MessageTypes.OFFER:
               console.log('📥 OFFER received from device:', message.deviceId);

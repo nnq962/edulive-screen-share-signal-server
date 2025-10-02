@@ -7,6 +7,8 @@ export interface DeviceInfo {
   lastSeen: Date;
   isStreaming: boolean;
   roomId?: string;
+  screenWidth?: number;
+  screenHeight?: number;
 }
 
 // WebSocket message interface
