@@ -38,12 +38,12 @@ http://localhost:3000
 
 1. **Mở Android App:** `edulive-screen-share-signal-server/android-app/WebrtcScreenShare`
 
-1. **Thay đổi Gradle JDK:**  
+2. **Thay đổi Gradle JDK:**  
    - `File > Settings > Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK > Download JDK`  
    - Chọn **Version: 17**, **Vendor: Microsoft OpenJDK 17.0.16 aarch64**  
    - Sau khi tải xong, đặt `Gradle JDK = ms-17`  
 
-2. **Thay đổi org.gradle.java.home:**  
+3. **Thay đổi org.gradle.java.home:**  
    - Mở file `gradle.properties`  
    - Sửa `org.gradle.java.home` thành đường dẫn JDK ở bước 1  
    - Ví dụ (macOS):  
@@ -51,11 +51,11 @@ http://localhost:3000
      org.gradle.java.home=/Users/quyetnguyen/Library/Java/JavaVirtualMachines/ms-17.0.16/Contents/Home
      ```
 
-3. **Thay đổi config**
+4. **Thay đổi config**
     - Khi cài app trên nhiều thiết bị thì cần thay đổi `DEVICE_NAME` và `FIXED_DEVICE_ID` khác nhau trên các thiết bị để tránh xung đột
     - Mở file `WebrtcScreenShare/app/src/main/java/com/codewithkael/webrtcscreenshare/config`
     - `WS_URL:` địa chỉ server
     - `DEVICE_NAME:` Tên thiết bị
     - `FIXED_DEVICE_ID`: ID thiết bị
 
-4. **Sync và build**
+5. **Sync và build**
