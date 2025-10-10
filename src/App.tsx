@@ -8,47 +8,23 @@ const { Text } = Typography
 
 type PointerAction = 'DOWN' | 'MOVE' | 'UP' | 'CANCEL'
 
-type KeyboardCommand = {
-  type: 'KEYBOARD'
-  action: string
-  text?: string
-  key?: string
-  code?: string
-  keyCode?: number
-  altKey?: boolean
-  ctrlKey?: boolean
-  shiftKey?: boolean
-  metaKey?: boolean
-}
-
 interface PointerState {
   pointerId: number
   pointerType: string
   startX: number
   startY: number
-  startRatioX: number
-  startRatioY: number
   lastX: number
   lastY: number
-  lastRatioX: number
-  lastRatioY: number
   lastSentX: number
   lastSentY: number
   lastSentTime: number
-  lastSentPerfTime: number
-  lastPressure: number
-  lastSentPressure: number
-  lastWidth: number
-  lastHeight: number
-  startTime: number
-  keepAliveTimer: number | null
-  releaseTimer: number | null
+  downTime: number
 }
 
-const POINTER_KEEP_ALIVE_INTERVAL_MS = 40
-const POINTER_KEEP_ALIVE_MIN_ELAPSED_MS = 55
+// Reduced constants for mouse-only control
+const MOUSE_MOVE_THROTTLE_MS = 32 // Send MOVE at most every 32ms (30fps)
 const SCROLL_POINTER_ID = -1
-const SCROLL_RELEASE_TIMEOUT_MS = 140
+const SCROLL_RELEASE_TIMEOUT_MS = 150
 
 function App() {
   // Get the current hostname/IP from the browser
@@ -70,18 +46,6 @@ function App() {
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const pointerStatesRef = useRef<Map<number, PointerState>>(new Map())
 
-  const stopPointerTimer = useCallback((state: PointerState | undefined | null) => {
-    if (!state) return
-    if (state.keepAliveTimer != null) {
-      window.clearInterval(state.keepAliveTimer)
-      state.keepAliveTimer = null
-    }
-    if (state.releaseTimer != null) {
-      window.clearTimeout(state.releaseTimer)
-      state.releaseTimer = null
-    }
-  }, [])
-
   // WebSocket connection
   const {
     isConnected,
@@ -101,15 +65,12 @@ function App() {
     if (!webrtcManagerRef.current) {
       webrtcManagerRef.current = new WebRTCManager()
 
-      // Override onRemoteStream to update state
       webrtcManagerRef.current.onRemoteStream = (deviceId: string, stream: MediaStream) => {
-        // Chỉ cập nhật stream khi trùng với thiết bị đang được chọn
         if (deviceId === selectedDeviceId) {
           setRemoteStream(stream)
         }
       }
 
-      // Forward ICE candidates from viewer (web) back to server → device
       webrtcManagerRef.current.onIceCandidate = (deviceId: string, candidate: RTCIceCandidate) => {
         try {
           sendMessage({
@@ -128,7 +89,6 @@ function App() {
     }
   }, [selectedDeviceId])
 
-  // Update video element when remote stream changes
   useEffect(() => {
     if (videoRef.current && remoteStream) {
       videoRef.current.srcObject = remoteStream
@@ -200,17 +160,11 @@ function App() {
   }, [selectedDeviceId, isConnected, sendMessage])
 
   useEffect(() => {
-    if (!isConnected) {
-      return
-    }
+    if (!isConnected) return
     const pendingId = pendingRequestRef.current
-    if (!pendingId) {
-      return
-    }
+    if (!pendingId) return
     const device = devices.find(d => d.id === pendingId && d.isConnected)
-    if (!device) {
-      return
-    }
+    if (!device) return
     sendStreamRequest(pendingId)
     pendingRequestRef.current = null
   }, [devices, isConnected, sendStreamRequest])
@@ -229,10 +183,8 @@ function App() {
   function handleWebSocketMessage(message: any) {
     console.log('WebSocket message received:', message)
 
-    // Handle WebRTC signaling messages
     switch (message.type) {
       case 'DEVICE_WENT_OFFLINE': {
-        // Close modal if the selected device went offline or stopped streaming
         const wentOfflineId = message.deviceId
         if (selectedDeviceId && wentOfflineId === selectedDeviceId) {
           setIsModalOpen(false)
@@ -296,7 +248,6 @@ function App() {
 
       console.log('📥 Handling OFFER from device:', deviceId)
 
-      // Parse offer string to RTCSessionDescriptionInit
       const offerObj: RTCSessionDescriptionInit = {
         type: 'offer',
         sdp: offer
@@ -317,7 +268,6 @@ function App() {
 
       await webrtcManagerRef.current.handleOffer(deviceId, offerObj)
 
-      // Send answer back to device
       const answer = await webrtcManagerRef.current.createAnswer(deviceId, offerObj)
       sendMessage({
         type: 'ANSWER',
@@ -336,7 +286,6 @@ function App() {
 
       console.log('📥 Handling ANSWER from device:', deviceId)
 
-      // Parse answer string to RTCSessionDescriptionInit
       const answerObj: RTCSessionDescriptionInit = {
         type: 'answer',
         sdp: answer
@@ -354,11 +303,9 @@ function App() {
 
       console.log('📥 Handling ICE_CANDIDATE from device:', deviceId)
 
-      // Parse candidate string to RTCIceCandidateInit
       let candidateObj: RTCIceCandidateInit
 
       if (typeof candidate === 'string') {
-        // If candidate is a JSON string, parse it
         try {
           const parsed = JSON.parse(candidate)
           const cand = parsed.candidate ?? parsed.sdp ?? candidate
@@ -368,13 +315,11 @@ function App() {
             sdpMid: parsed.sdpMid ?? parsed.mid
           }
         } catch {
-          // If parsing fails, treat as direct SDP/candidate string
           candidateObj = {
             candidate: candidate
           }
         }
       } else {
-        // If candidate is already an object
         const obj = candidate as any
         candidateObj = {
           candidate: obj.candidate ?? obj.sdp ?? '',
@@ -405,7 +350,6 @@ function App() {
 
   function openDeviceModal(deviceId: string) {
     setSelectedDeviceId(deviceId)
-    // Try to get an existing stream immediately
     const stream = webrtcManagerRef.current?.getRemoteStream(deviceId) || null
     setRemoteStream(stream)
     setIsModalOpen(true)
@@ -460,9 +404,6 @@ function App() {
     normalizedX: number
     normalizedY: number
     durationMs: number
-    pressure?: number
-    width?: number
-    height?: number
   }) => {
     if (!selectedDeviceId) return
     try {
@@ -471,80 +412,31 @@ function App() {
         deviceId: selectedDeviceId,
         data: command
       } as any)
+      
+      if (command.action === 'DOWN' || command.action === 'UP') {
+        console.log(`[WEB][Mouse] ${command.action} at (${command.x}, ${command.y})`)
+      }
     } catch (error) {
       console.error('[WEB][Control] Failed to send pointer command', error)
     }
   }, [selectedDeviceId, sendMessage])
 
-  const finalizePointer = useCallback((pointerId: number, action: PointerAction = 'UP') => {
-    const state = pointerStatesRef.current.get(pointerId)
-    if (!state) return
-
-    const perfNow = performance.now()
-    const elapsed = Math.max(8, Math.round(perfNow - state.lastSentPerfTime))
-    const timestamp = state.lastSentTime + elapsed
-    state.lastSentTime = timestamp
-    state.lastSentPerfTime = perfNow
-
-    dispatchPointerCommand({
-      type: 'POINTER',
-      action,
-      pointerId,
-      pointerType: state.pointerType,
-      x: state.lastX,
-      y: state.lastY,
-      normalizedX: state.lastRatioX,
-      normalizedY: state.lastRatioY,
-      durationMs: elapsed,
-      pressure: state.lastPressure,
-      width: state.lastWidth,
-      height: state.lastHeight
-    })
-
-    console.log('[WEB][Control] POINTER', action, {
-      pointerId,
-      x: state.lastX,
-      y: state.lastY,
-      pointerType: state.pointerType
-    })
-
-    stopPointerTimer(state)
-    pointerStatesRef.current.delete(pointerId)
-  }, [dispatchPointerCommand, stopPointerTimer])
-
-  const schedulePointerRelease = useCallback((pointerId: number, timeout: number = SCROLL_RELEASE_TIMEOUT_MS) => {
-    const state = pointerStatesRef.current.get(pointerId)
-    if (!state) return
-    if (state.releaseTimer != null) {
-      window.clearTimeout(state.releaseTimer)
-    }
-    state.releaseTimer = window.setTimeout(() => {
-      const current = pointerStatesRef.current.get(pointerId)
-      if (!current) {
-        return
-      }
-      current.releaseTimer = null
-      finalizePointer(pointerId, 'UP')
-    }, timeout)
-  }, [finalizePointer])
-
   const clearAllPointerStates = useCallback(() => {
-    const ids = Array.from(pointerStatesRef.current.keys())
-    ids.forEach(id => finalizePointer(id, 'CANCEL'))
-  }, [finalizePointer])
-
-  const dispatchKeyboardCommand = useCallback((command: KeyboardCommand) => {
-    if (!selectedDeviceId) return
-    try {
-      sendMessage({
-        type: 'CONTROL_COMMAND',
-        deviceId: selectedDeviceId,
-        data: command
-      } as any)
-    } catch (error) {
-      console.error('[WEB][Control] Failed to send keyboard command', error)
-    }
-  }, [selectedDeviceId, sendMessage])
+    pointerStatesRef.current.forEach((state, id) => {
+      dispatchPointerCommand({
+        type: 'POINTER',
+        action: 'CANCEL',
+        pointerId: id,
+        pointerType: state.pointerType,
+        x: state.lastX,
+        y: state.lastY,
+        normalizedX: state.lastX / (physicalSize?.width ?? 1),
+        normalizedY: state.lastY / (physicalSize?.height ?? 1),
+        durationMs: 8
+      })
+    })
+    pointerStatesRef.current.clear()
+  }, [dispatchPointerCommand, physicalSize])
 
   useEffect(() => {
     if (!isStreamReady) {
@@ -552,123 +444,9 @@ function App() {
     }
   }, [isStreamReady, clearAllPointerStates])
 
-  useEffect(() => () => clearAllPointerStates(), [clearAllPointerStates])
-
-  const shouldCaptureKeyboard = isModalOpen && isStreamReady && !!selectedDeviceId
-
-  const handleKeyDown = useCallback((event: KeyboardEvent) => {
-    if (!shouldCaptureKeyboard) return
-
-    const target = event.target as HTMLElement | null
-    if (target) {
-      const tagName = target.tagName
-      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || target.isContentEditable) {
-        return
-      }
-    }
-
-    const key = event.key
-    const printable = key.length === 1 && !event.ctrlKey && !event.metaKey
-
-    const modifiers = {
-      altKey: event.altKey,
-      ctrlKey: event.ctrlKey,
-      shiftKey: event.shiftKey,
-      metaKey: event.metaKey
-    }
-
-    const baseCommand = {
-      type: 'KEYBOARD' as const,
-      key,
-      code: event.code,
-      keyCode: event.keyCode,
-      ...modifiers
-    }
-
-    if (event.ctrlKey || event.metaKey) {
-      if (event.key.toLowerCase() !== 'v') {
-        return
-      }
-    }
-
-    if (key === 'Backspace') {
-      event.preventDefault()
-      dispatchKeyboardCommand({
-        ...baseCommand,
-        action: 'BACKSPACE'
-      })
-      return
-    }
-
-    if (key === 'Enter') {
-      event.preventDefault()
-      dispatchKeyboardCommand({
-        ...baseCommand,
-        action: 'ENTER'
-      })
-      return
-    }
-
-    if (key === 'Tab') {
-      event.preventDefault()
-      dispatchKeyboardCommand({
-        ...baseCommand,
-        action: 'TAB'
-      })
-      return
-    }
-
-    if (printable) {
-      event.preventDefault()
-      dispatchKeyboardCommand({
-        ...baseCommand,
-        action: 'INSERT_TEXT',
-        text: key
-      })
-      return
-    }
-  }, [dispatchKeyboardCommand, shouldCaptureKeyboard])
-
-  const handlePasteEvent = useCallback((event: ClipboardEvent) => {
-    if (!shouldCaptureKeyboard) return
-
-    const target = event.target as HTMLElement | null
-    if (target) {
-      const tagName = target.tagName
-      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || target.isContentEditable) {
-        return
-      }
-    }
-
-    const text = event.clipboardData?.getData('text')
-    if (!text) {
-      return
-    }
-
-    event.preventDefault()
-    dispatchKeyboardCommand({
-      type: 'KEYBOARD',
-      action: 'INSERT_TEXT',
-      text,
-      key: 'Paste',
-      code: 'Paste'
-    })
-  }, [dispatchKeyboardCommand, shouldCaptureKeyboard])
-
-  useEffect(() => {
-    if (!shouldCaptureKeyboard) return
-
-    const keyListener = (event: KeyboardEvent) => handleKeyDown(event)
-    const pasteListener = (event: ClipboardEvent) => handlePasteEvent(event)
-
-    window.addEventListener('keydown', keyListener, true)
-    window.addEventListener('paste', pasteListener, true)
-
-    return () => {
-      window.removeEventListener('keydown', keyListener, true)
-      window.removeEventListener('paste', pasteListener, true)
-    }
-  }, [handleKeyDown, handlePasteEvent, shouldCaptureKeyboard])
+  useEffect(() => () => {
+    clearAllPointerStates()
+  }, [clearAllPointerStates])
 
   useEffect(() => {
     if (isModalOpen && isStreamReady) {
@@ -680,20 +458,21 @@ function App() {
     }
   }, [isModalOpen, isStreamReady])
 
-  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+  const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     if (!isStreamReady || !selectedDeviceId || !baseSize || !videoContainerRef.current) return
-    if (event.pointerType === 'mouse' && event.button !== 0) return
+    
+    // Only handle left mouse button
+    if (event.button !== 0) return
 
     const bounds = videoContainerRef.current.getBoundingClientRect()
     if (bounds.width === 0 || bounds.height === 0) return
 
-    const pointerId = event.pointerId
-    const perfNow = performance.now()
+    const pointerId = 1 // Fixed pointer ID for mouse
     const existingState = pointerStatesRef.current.get(pointerId)
     if (existingState) {
-      stopPointerTimer(existingState)
       pointerStatesRef.current.delete(pointerId)
     }
+    
     const rawXRatio = (event.clientX - bounds.left) / bounds.width
     const rawYRatio = (event.clientY - bounds.top) / bounds.height
     const xRatio = Math.min(Math.max(rawXRatio, 0), 1)
@@ -701,35 +480,19 @@ function App() {
     const targetSize = physicalSize ?? baseSize
     const x = Math.round(targetSize.width * xRatio)
     const y = Math.round(targetSize.height * yRatio)
-    const now = typeof event.timeStamp === 'number' ? event.timeStamp : performance.now()
-
-    const pressure = event.pressure && event.pressure > 0 ? event.pressure : (event.pointerType === 'mouse' ? 0 : 0.5)
-    const width = event.width || 0
-    const height = event.height || 0
-    const pointerType = event.pointerType || 'touch'
+    const now = Date.now()
 
     const pointerState: PointerState = {
       pointerId,
-      pointerType,
+      pointerType: 'mouse',
       startX: x,
       startY: y,
-      startRatioX: xRatio,
-      startRatioY: yRatio,
       lastX: x,
       lastY: y,
-      lastRatioX: xRatio,
-      lastRatioY: yRatio,
       lastSentX: x,
       lastSentY: y,
       lastSentTime: now,
-      lastSentPerfTime: perfNow,
-      lastPressure: pressure,
-      lastSentPressure: pressure,
-      lastWidth: width,
-      lastHeight: height,
-      startTime: now,
-      keepAliveTimer: null,
-      releaseTimer: null
+      downTime: now
     }
     pointerStatesRef.current.set(pointerId, pointerState)
 
@@ -737,156 +500,98 @@ function App() {
       type: 'POINTER',
       action: 'DOWN',
       pointerId,
-      pointerType,
+      pointerType: 'mouse',
       x,
       y,
       normalizedX: xRatio,
       normalizedY: yRatio,
-      durationMs: 16,
-      pressure,
-      width,
-      height
+      durationMs: 16
     })
 
-    console.log('[WEB][Control] POINTER DOWN', {
-      pointerId,
-      pointerType,
-      x,
-      y,
-      pressure,
-      base: targetSize
-    })
-
-    const keepAliveTimer = window.setInterval(() => {
-      const current = pointerStatesRef.current.get(pointerId)
-      if (!current) {
-        window.clearInterval(keepAliveTimer)
-        return
-      }
-      const perfNowInner = performance.now()
-      const elapsed = perfNowInner - current.lastSentPerfTime
-      if (elapsed < POINTER_KEEP_ALIVE_MIN_ELAPSED_MS) {
-        return
-      }
-
-      const approxTimestamp = current.lastSentTime + elapsed
-      current.lastSentTime = approxTimestamp
-      current.lastSentPerfTime = perfNowInner
-      dispatchPointerCommand({
-        type: 'POINTER',
-        action: 'MOVE',
-        pointerId,
-        pointerType: current.pointerType,
-        x: current.lastX,
-        y: current.lastY,
-        normalizedX: current.lastRatioX,
-        normalizedY: current.lastRatioY,
-        durationMs: Math.max(8, Math.round(elapsed)),
-        pressure: current.lastPressure,
-        width: current.lastWidth,
-        height: current.lastHeight
-      })
-    }, POINTER_KEEP_ALIVE_INTERVAL_MS)
-    pointerState.keepAliveTimer = keepAliveTimer
-
-    try {
-      (event.currentTarget as HTMLElement).setPointerCapture(pointerId)
-    } catch (error) {
-      console.warn('[WEB][Control] Failed to set pointer capture', error)
-    }
     event.preventDefault()
-  }, [isStreamReady, selectedDeviceId, baseSize, physicalSize, dispatchPointerCommand, stopPointerTimer])
+  }, [isStreamReady, selectedDeviceId, baseSize, physicalSize, dispatchPointerCommand])
 
-  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const state = pointerStatesRef.current.get(event.pointerId)
+  const handleMouseMove = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const state = pointerStatesRef.current.get(1) // Mouse pointer ID is always 1
     if (!state || !videoContainerRef.current || !baseSize) return
 
     const bounds = videoContainerRef.current.getBoundingClientRect()
     if (bounds.width === 0 || bounds.height === 0) return
 
     const targetSize = physicalSize ?? baseSize
-    const targetDiagonal = Math.hypot(targetSize.width, targetSize.height)
+    const rawXRatio = (event.clientX - bounds.left) / bounds.width
+    const rawYRatio = (event.clientY - bounds.top) / bounds.height
+    const xRatio = Math.min(Math.max(rawXRatio, 0), 1)
+    const yRatio = Math.min(Math.max(rawYRatio, 0), 1)
+    const x = Math.round(targetSize.width * xRatio)
+    const y = Math.round(targetSize.height * yRatio)
 
-    const processSample = (
-      clientX: number,
-      clientY: number,
-      pressureSample: number | undefined,
-      widthSample: number | undefined,
-      heightSample: number | undefined,
-      sampleTime: number | undefined
-    ) => {
-      const rawXRatio = (clientX - bounds.left) / bounds.width
-      const rawYRatio = (clientY - bounds.top) / bounds.height
-      const xRatio = Math.min(Math.max(rawXRatio, 0), 1)
-      const yRatio = Math.min(Math.max(rawYRatio, 0), 1)
-      const x = Math.round(targetSize.width * xRatio)
-      const y = Math.round(targetSize.height * yRatio)
-      const pressure = pressureSample && pressureSample > 0 ? pressureSample : state.lastPressure
-      const width = widthSample || state.lastWidth
-      const height = heightSample || state.lastHeight
+    state.lastX = x
+    state.lastY = y
 
-      state.lastX = x
-      state.lastY = y
-      state.lastRatioX = xRatio
-      state.lastRatioY = yRatio
-      state.lastPressure = pressure
-      state.lastWidth = width
-      state.lastHeight = height
-
-      const timestamp = typeof sampleTime === 'number' ? sampleTime : performance.now()
-      const elapsed = Math.max(0, timestamp - state.lastSentTime)
-      const delta = Math.hypot(x - state.lastSentX, y - state.lastSentY)
-      const minDistance = Math.max(1.5, targetDiagonal * 0.0015)
-      const minInterval = 8
-
-      if (delta < minDistance && elapsed < minInterval) {
-        return false
-      }
-
-      state.lastSentX = x
-      state.lastSentY = y
-      state.lastSentTime = timestamp
-      state.lastSentPressure = pressure
-      state.lastSentPerfTime = performance.now()
-
-      dispatchPointerCommand({
-        type: 'POINTER',
-        action: 'MOVE',
-        pointerId: event.pointerId,
-        pointerType: state.pointerType,
-        x,
-        y,
-        normalizedX: xRatio,
-        normalizedY: yRatio,
-        durationMs: Math.max(8, Math.round(elapsed)),
-        pressure,
-        width,
-        height
-      })
-      return true
+    const now = Date.now()
+    const timeSinceLastSend = now - state.lastSentTime
+    
+    // Throttle MOVE events - only send if enough time has passed
+    if (timeSinceLastSend < MOUSE_MOVE_THROTTLE_MS) {
+      return
     }
 
-    const nativeEvent = event.nativeEvent
-    const coalesced =
-      typeof nativeEvent.getCoalescedEvents === 'function' ? nativeEvent.getCoalescedEvents() : []
-    const samples = coalesced && coalesced.length > 0 ? [...coalesced, nativeEvent] : [nativeEvent]
-    let dispatched = false
-
-    for (const sample of samples) {
-      dispatched = processSample(
-        sample.clientX,
-        sample.clientY,
-        sample.pressure,
-        sample.width,
-        sample.height,
-        sample.timeStamp
-      ) || dispatched
+    // Calculate distance moved
+    const dx = x - state.lastSentX
+    const dy = y - state.lastSentY
+    const distance = Math.sqrt(dx * dx + dy * dy)
+    
+    // Only send if moved at least 3 pixels
+    if (distance < 3) {
+      return
     }
 
-    if (dispatched) {
-      event.preventDefault()
-    }
+    state.lastSentX = x
+    state.lastSentY = y
+    state.lastSentTime = now
+
+    dispatchPointerCommand({
+      type: 'POINTER',
+      action: 'MOVE',
+      pointerId: 1,
+      pointerType: state.pointerType,
+      x,
+      y,
+      normalizedX: xRatio,
+      normalizedY: yRatio,
+      durationMs: Math.round(timeSinceLastSend)
+    })
+
+    event.preventDefault()
   }, [baseSize, physicalSize, dispatchPointerCommand])
+
+  const handleMouseUp = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const state = pointerStatesRef.current.get(1)
+    if (!state) return
+
+    const x = state.lastX
+    const y = state.lastY
+    const xRatio = x / (physicalSize?.width ?? baseSize?.width ?? 1)
+    const yRatio = y / (physicalSize?.height ?? baseSize?.height ?? 1)
+    const now = Date.now()
+    const duration = Math.max(8, now - state.lastSentTime)
+
+    dispatchPointerCommand({
+      type: 'POINTER',
+      action: 'UP',
+      pointerId: 1,
+      pointerType: state.pointerType,
+      x,
+      y,
+      normalizedX: xRatio,
+      normalizedY: yRatio,
+      durationMs: duration
+    })
+
+    pointerStatesRef.current.delete(1)
+    event.preventDefault()
+  }, [dispatchPointerCommand, physicalSize, baseSize])
 
   const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
     if (!isStreamReady || !selectedDeviceId || !videoContainerRef.current || !baseSize) {
@@ -905,48 +610,26 @@ function App() {
     const pointerId = SCROLL_POINTER_ID
     let state = pointerStatesRef.current.get(pointerId)
 
-    const basePressure = 0.45
-    const pointerType = 'wheel'
-
-    const resolvePosition = (clientX: number, clientY: number) => {
-      const xRatioRaw = (clientX - bounds.left) / bounds.width
-      const yRatioRaw = (clientY - bounds.top) / bounds.height
-      const xRatio = Math.min(Math.max(xRatioRaw, 0), 1)
-      const yRatio = Math.min(Math.max(yRatioRaw, 0), 1)
-      return {
-        xRatio,
-        yRatio,
-        x: Math.round(targetSize.width * xRatio),
-        y: Math.round(targetSize.height * yRatio)
-      }
-    }
-
     if (!state) {
-      const start = resolvePosition(event.clientX, event.clientY)
-      const now = typeof event.timeStamp === 'number' ? event.timeStamp : performance.now()
-      const perfNow = performance.now()
+      const rawXRatio = (event.clientX - bounds.left) / bounds.width
+      const rawYRatio = (event.clientY - bounds.top) / bounds.height
+      const xRatio = Math.min(Math.max(rawXRatio, 0), 1)
+      const yRatio = Math.min(Math.max(rawYRatio, 0), 1)
+      const x = Math.round(targetSize.width * xRatio)
+      const y = Math.round(targetSize.height * yRatio)
+      const now = Date.now()
+      
       state = {
         pointerId,
-        pointerType,
-        startX: start.x,
-        startY: start.y,
-        startRatioX: start.xRatio,
-        startRatioY: start.yRatio,
-        lastX: start.x,
-        lastY: start.y,
-        lastRatioX: start.xRatio,
-        lastRatioY: start.yRatio,
-        lastSentX: start.x,
-        lastSentY: start.y,
+        pointerType: 'wheel',
+        startX: x,
+        startY: y,
+        lastX: x,
+        lastY: y,
+        lastSentX: x,
+        lastSentY: y,
         lastSentTime: now,
-        lastSentPerfTime: perfNow,
-        lastPressure: basePressure,
-        lastSentPressure: basePressure,
-        lastWidth: 0,
-        lastHeight: 0,
-        startTime: now,
-        keepAliveTimer: null,
-        releaseTimer: null
+        downTime: now
       }
       pointerStatesRef.current.set(pointerId, state)
 
@@ -954,21 +637,12 @@ function App() {
         type: 'POINTER',
         action: 'DOWN',
         pointerId,
-        pointerType,
-        x: start.x,
-        y: start.y,
-        normalizedX: start.xRatio,
-        normalizedY: start.yRatio,
-        durationMs: 16,
-        pressure: basePressure,
-        width: 0,
-        height: 0
-      })
-
-      console.log('[WEB][Control] POINTER DOWN (wheel)', {
-        pointerId,
-        x: start.x,
-        y: start.y
+        pointerType: 'wheel',
+        x,
+        y,
+        normalizedX: xRatio,
+        normalizedY: yRatio,
+        durationMs: 16
       })
     }
 
@@ -987,117 +661,57 @@ function App() {
     const nextXRatio = targetSize.width === 0 ? 0 : nextX / targetSize.width
     const nextYRatio = targetSize.height === 0 ? 0 : nextY / targetSize.height
 
-    const timestamp = typeof event.timeStamp === 'number' ? event.timeStamp : performance.now()
-    const elapsed = Math.max(8, Math.round(timestamp - state.lastSentTime))
+    const now = Date.now()
+    const elapsed = Math.max(8, now - state.lastSentTime)
 
     state.lastX = nextX
     state.lastY = nextY
-    state.lastRatioX = nextXRatio
-    state.lastRatioY = nextYRatio
-    state.lastPressure = basePressure
-    state.lastWidth = 0
-    state.lastHeight = 0
     state.lastSentX = nextX
     state.lastSentY = nextY
-    state.lastSentTime = timestamp
-    state.lastSentPerfTime = performance.now()
-    state.lastSentPressure = basePressure
+    state.lastSentTime = now
 
     dispatchPointerCommand({
       type: 'POINTER',
       action: 'MOVE',
       pointerId,
-      pointerType,
+      pointerType: 'wheel',
       x: nextX,
       y: nextY,
       normalizedX: nextXRatio,
       normalizedY: nextYRatio,
-      durationMs: elapsed,
-      pressure: basePressure,
-      width: 0,
-      height: 0
+      durationMs: elapsed
     })
 
-    schedulePointerRelease(pointerId)
-  }, [isStreamReady, selectedDeviceId, baseSize, physicalSize, dispatchPointerCommand, schedulePointerRelease])
-
-  const handlePointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const state = pointerStatesRef.current.get(event.pointerId)
-    if (!state) return
-
-    try {
-      (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-    } catch {}
-
-    const x = state.lastX
-    const y = state.lastY
-    const xRatio = state.lastRatioX
-    const yRatio = state.lastRatioY
-    const now = typeof event.timeStamp === 'number' ? event.timeStamp : performance.now()
-    const duration = Math.max(8, Math.round(now - state.lastSentTime))
-    const pressure = event.pressure && event.pressure > 0 ? event.pressure : state.lastPressure
-
-    dispatchPointerCommand({
-      type: 'POINTER',
-      action: 'UP',
-      pointerId: event.pointerId,
-      pointerType: state.pointerType,
-      x,
-      y,
-      normalizedX: xRatio,
-      normalizedY: yRatio,
-      durationMs: duration,
-      pressure,
-      width: state.lastWidth,
-      height: state.lastHeight
-    })
-
-    console.log('[WEB][Control] POINTER UP', {
-      pointerId: state.pointerId,
-      x,
-      y,
-      duration,
-      pointerType: state.pointerType
-    })
-
-    stopPointerTimer(state)
-    pointerStatesRef.current.delete(event.pointerId)
-    event.preventDefault()
-  }, [dispatchPointerCommand, stopPointerTimer])
-
-  const handlePointerCancel = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const state = pointerStatesRef.current.get(event.pointerId)
-    if (!state) return
-    try {
-      (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-    } catch {}
-
-    dispatchPointerCommand({
-      type: 'POINTER',
-      action: 'CANCEL',
-      pointerId: event.pointerId,
-      pointerType: state.pointerType,
-      x: state.lastSentX,
-      y: state.lastSentY,
-      normalizedX: state.lastRatioX,
-      normalizedY: state.lastRatioY,
-      durationMs: 8,
-      pressure: state.lastSentPressure,
-      width: state.lastWidth,
-      height: state.lastHeight
-    })
-
-    console.log('[WEB][Control] POINTER CANCEL', {
-      pointerId: state.pointerId,
-      x: state.lastSentX,
-      y: state.lastSentY,
-      pointerType: state.pointerType
-    })
-
-    stopPointerTimer(state)
-    pointerStatesRef.current.delete(event.pointerId)
-    event.preventDefault()
-  }, [dispatchPointerCommand, stopPointerTimer])
+    // Auto-release scroll pointer after timeout
+    const existingTimeout = (state as any).scrollTimeout
+    if (existingTimeout) {
+      clearTimeout(existingTimeout)
+    }
+    
+    (state as any).scrollTimeout = setTimeout(() => {
+      const scrollState = pointerStatesRef.current.get(pointerId)
+      if (scrollState) {
+        const x = scrollState.lastX
+        const y = scrollState.lastY
+        const xRatio = x / targetSize.width
+        const yRatio = y / targetSize.height
+        
+        dispatchPointerCommand({
+          type: 'POINTER',
+          action: 'UP',
+          pointerId,
+          pointerType: 'wheel',
+          x,
+          y,
+          normalizedX: xRatio,
+          normalizedY: yRatio,
+          durationMs: 8
+        })
+        
+        pointerStatesRef.current.delete(pointerId)
+      }
+    }, SCROLL_RELEASE_TIMEOUT_MS)
+  }, [isStreamReady, selectedDeviceId, baseSize, physicalSize, dispatchPointerCommand])
 
   function closeDeviceModal() {
     setIsModalOpen(false)
@@ -1108,8 +722,6 @@ function App() {
     setVideoSize(null)
     clearAllPointerStates()
   }
-
-  // Web không còn quyền Disconnect. Việc ngắt/kết nối do Android quản lý.
 
   return (
     <Layout style={{ background: '#fff', minHeight: '100vh' }}>
@@ -1180,7 +792,6 @@ function App() {
                 if (stream && videoRef.current.srcObject !== stream) {
                   try { videoRef.current.pause() } catch {}
                   try {
-                    // Attach and play
                     // @ts-ignore
                     videoRef.current.srcObject = stream
                     if (videoRef.current.videoWidth && videoRef.current.videoHeight) {
@@ -1195,7 +806,6 @@ function App() {
                   }
                 } else if (!stream) {
                   console.warn('[WEB][ModalOpen] No remoteStream for device, will retry attach')
-                  // Retry attach up to ~3s
                   let tries = 0
                   const tick = () => {
                     if (!videoRef.current) return
@@ -1228,7 +838,6 @@ function App() {
                 }
               }
             }
-            // Cleanup retries when modal closes
             if (!open && attachRetryRef.current) {
               window.clearInterval(attachRetryRef.current)
               attachRetryRef.current = null
@@ -1254,12 +863,10 @@ function App() {
               }}
               ref={videoContainerRef}
               tabIndex={0}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerEnd}
-              onPointerCancel={handlePointerCancel}
-              onPointerLeave={handlePointerCancel}
-              onLostPointerCapture={handlePointerCancel}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
               onWheel={handleWheel}
             >
               {!isStreamReady && (

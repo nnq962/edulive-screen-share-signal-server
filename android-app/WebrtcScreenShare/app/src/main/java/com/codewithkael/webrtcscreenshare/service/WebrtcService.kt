@@ -27,6 +27,7 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
     }
 
     @Inject lateinit var mainRepository: MainRepository
+    @Inject lateinit var socketClient: com.codewithkael.webrtcscreenshare.socket.SocketClient
 
     private lateinit var notificationManager: NotificationManager
     private lateinit var username:String
