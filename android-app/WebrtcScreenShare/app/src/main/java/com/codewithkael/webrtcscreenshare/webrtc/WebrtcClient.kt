@@ -180,9 +180,42 @@ class WebrtcClient @Inject constructor(
     }
 
     private fun createPeerConnection(observer: Observer): PeerConnection? {
-        return peerConnectionFactory.createPeerConnection(
+        val pc = peerConnectionFactory.createPeerConnection(
             iceServer, observer
         )
+        // Create a DataChannel for control commands so SCTP is negotiated in the SDP offer
+        try {
+            val init = DataChannel.Init().apply {
+                ordered = true
+                maxRetransmits = 3
+            }
+            val channel = pc?.createDataChannel("control", init)
+            channel?.registerObserver(object : DataChannel.Observer {
+                override fun onBufferedAmountChange(previousAmount: Long) {}
+                override fun onStateChange() {
+                    android.util.Log.d("EDU_SCREEN", "DataChannel state: ${channel.state().name}")
+                }
+                override fun onMessage(buffer: DataChannel.Buffer?) {
+                    if (buffer == null) return
+                    try {
+                        val bytes = ByteArray(buffer.data.remaining())
+                        buffer.data.get(bytes)
+                        val text = String(bytes)
+                        android.util.Log.d("EDU_DC", "RX via DataChannel: $text")
+                        // Expect { type: 'CONTROL_COMMAND', data: {...} }
+                        val json = com.google.gson.JsonParser.parseString(text).asJsonObject
+                        val type = if (json.has("type")) json.get("type").asString else null
+                        if (type == "CONTROL_COMMAND" && json.has("data")) {
+                            val cmd = gson.fromJson(json.get("data"), com.codewithkael.webrtcscreenshare.utils.RemoteControlCommand::class.java)
+                            com.codewithkael.webrtcscreenshare.service.RemoteControlAccessibilityService.dispatchCommand(cmd)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("EDU_SCREEN", "❌ Error handling DataChannel message: ${e.message}", e)
+                    }
+                }
+            })
+        } catch (_: Exception) {}
+        return pc
     }
 
     fun call(target: String) {

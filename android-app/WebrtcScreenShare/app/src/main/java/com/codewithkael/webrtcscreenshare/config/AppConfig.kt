@@ -5,8 +5,8 @@ object AppConfig {
     const val WS_URL: String = "ws://192.168.1.32:3001/ws"
 
     // TÊN THIẾT BỊ MẶC ĐỊNH (chỉnh tại đây)
-    const val DEVICE_NAME: String = "Android Device SAMSUNG"
+    const val DEVICE_NAME: String = "Android Device MEIZU"
 
     // ID THIẾT BỊ CỐ ĐỊNH (tùy chọn). Để rỗng "" thì app sẽ tự lưu một ID bền vững lần đầu chạy
-    const val FIXED_DEVICE_ID: String = "android1"
+    const val FIXED_DEVICE_ID: String = "android0"
 }

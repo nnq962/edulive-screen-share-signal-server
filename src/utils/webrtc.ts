@@ -30,7 +30,7 @@ export class WebRTCManager {
   }
 
   // Create peer connection for a specific device
-  async createPeerConnection(deviceId: string, isInitiator: boolean = false): Promise<RTCPeerConnection> {
+  async createPeerConnection(deviceId: string, _isInitiator: boolean = false): Promise<RTCPeerConnection> {
     const peerConnection = new RTCPeerConnection(RTC_CONFIG);
     
     // Handle ICE candidates
@@ -55,6 +55,25 @@ export class WebRTCManager {
       }
     };
 
+    // Handle incoming DataChannel from Android
+    peerConnection.ondatachannel = (event: RTCDataChannelEvent) => {
+      const channel = event.channel;
+      this.dataChannels.set(deviceId, channel);
+      channel.onopen = () => {
+        console.log(`[WEB][DC] open for ${deviceId}`);
+      };
+      channel.onclose = () => {
+        console.log(`[WEB][DC] close for ${deviceId}`);
+        this.dataChannels.delete(deviceId);
+      };
+      channel.onerror = (e) => {
+        console.error(`[WEB][DC] error for ${deviceId}:`, e);
+      };
+      channel.onmessage = (e) => {
+        console.log(`[WEB][DC] message from ${deviceId}:`, e.data);
+      };
+    };
+
     this.peerConnections.set(deviceId, peerConnection);
     return peerConnection;
   }
@@ -64,7 +83,6 @@ export class WebRTCManager {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          mediaSource: 'screen',
           width: { ideal: 1920 },
           height: { ideal: 1080 },
           frameRate: { ideal: 30 }
@@ -75,7 +93,7 @@ export class WebRTCManager {
       this.localStream = stream;
       
       // Add tracks to all peer connections
-      this.peerConnections.forEach((peerConnection, deviceId) => {
+      this.peerConnections.forEach((peerConnection, _deviceId) => {
         stream.getTracks().forEach(track => {
           peerConnection.addTrack(track, stream);
         });
@@ -216,16 +234,31 @@ export class WebRTCManager {
     this.stopScreenShare();
   }
 
+  // Send control command via DataChannel
+  sendControlCommand(deviceId: string, command: any) {
+    const dataChannel = this.dataChannels.get(deviceId);
+    if (!dataChannel || dataChannel.readyState !== 'open') {
+      return false;
+    }
+    try {
+      dataChannel.send(JSON.stringify({ type: 'CONTROL_COMMAND', data: command }));
+      return true;
+    } catch (e) {
+      console.error('sendControlCommand error', e);
+      return false;
+    }
+  }
+
   // Event handlers (overridable or assignable by consumers)
-  public onIceCandidate(deviceId: string, candidate: RTCIceCandidate) {
+  public onIceCandidate(_deviceId: string, _candidate: RTCIceCandidate) {
     // Override in parent class
   }
 
-  public onRemoteStream(deviceId: string, stream: MediaStream) {
+  public onRemoteStream(_deviceId: string, _stream: MediaStream) {
     // Override in parent class
   }
 
-  public onAnswer(deviceId: string, answer: RTCSessionDescriptionInit) {
+  public onAnswer(_deviceId: string, _answer: RTCSessionDescriptionInit) {
     // Override in parent class
   }
 }

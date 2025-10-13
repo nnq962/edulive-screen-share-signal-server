@@ -538,21 +538,20 @@ function App() {
     normalizedY: number
     durationMs: number
   }) => {
-    if (!selectedDeviceId) return
+    if (!selectedDeviceId || !webrtcManagerRef.current) return
     try {
-      sendMessage({
-        type: 'CONTROL_COMMAND',
-        deviceId: selectedDeviceId,
-        data: command
-      } as any)
-      
+      const ok = webrtcManagerRef.current.sendControlCommand(selectedDeviceId, command)
+      if (!ok) {
+        console.warn('[WEB][Control] DataChannel not ready, ignoring command')
+        return
+      }
       if (command.action === 'DOWN' || command.action === 'UP') {
         console.log(`[WEB][Mouse] ${command.action} at (${command.x}, ${command.y})`)
       }
     } catch (error) {
       console.error('[WEB][Control] Failed to send pointer command', error)
     }
-  }, [selectedDeviceId, sendMessage])
+  }, [selectedDeviceId, webrtcManagerRef])
 
   const clearAllPointerStates = useCallback(() => {
     pointerStatesRef.current.forEach((state, id) => {
