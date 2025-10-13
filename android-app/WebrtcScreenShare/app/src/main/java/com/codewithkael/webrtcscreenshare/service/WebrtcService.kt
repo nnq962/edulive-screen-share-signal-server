@@ -24,6 +24,11 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
         var screenPermissionIntent : Intent ?= null
         var surfaceView:SurfaceViewRenderer?=null
         var listener: MainRepository.Listener?=null
+        private var instance: WebrtcService? = null
+        
+        fun getMainRepository(): MainRepository? {
+            return instance?.mainRepository
+        }
     }
 
     @Inject lateinit var mainRepository: MainRepository
@@ -37,6 +42,7 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         notificationManager = getSystemService(
             NotificationManager::class.java
         )
@@ -114,6 +120,7 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
         notificationManager.cancelAll()
         isInitialized = false
         isStreaming = false
+        instance = null
     }
 
     private fun startServiceWithNotification(){

@@ -155,6 +155,11 @@ class MainRepository @Inject constructor(
         isScreenCapturing = false
     }
 
+    fun checkOrientationChange() {
+        Log.d("EDU_SCREEN", "🔍 MainRepository: Calling webrtcClient.checkOrientationChange()")
+        webrtcClient.checkOrientationChange()
+    }
+
     private fun initWebrtcClient() {
         webrtcClient.listener = this
         webrtcClient.initializeWebrtcClient(username, surfaceView,

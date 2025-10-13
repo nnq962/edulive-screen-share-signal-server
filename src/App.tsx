@@ -43,6 +43,8 @@ function App() {
   const [videoSize, setVideoSize] = useState<{ width: number; height: number } | null>(null)
   const [isStreamReady, setIsStreamReady] = useState(false)
   const [physicalSize, setPhysicalSize] = useState<{ width: number; height: number } | null>(null)
+  const [isOrientationChanging, setIsOrientationChanging] = useState(false)
+  const [videoKey, setVideoKey] = useState(0) // Force re-render when container size changes
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const pointerStatesRef = useRef<Map<number, PointerState>>(new Map())
 
@@ -91,17 +93,41 @@ function App() {
 
   useEffect(() => {
     if (videoRef.current && remoteStream) {
+      console.log('🎥 Re-attaching stream to video element')
       videoRef.current.srcObject = remoteStream
       const play = async () => {
         try {
           await videoRef.current?.play()
+          console.log('🎥 Video play successful after re-attach')
         } catch (e) {
           console.warn('Tự phát video bị chặn, sẽ phát khi người dùng tương tác', e)
         }
       }
       play()
+    } else if (videoRef.current && !remoteStream) {
+      console.warn('🎥 Video element exists but no remoteStream available')
+      // Try to get remoteStream from WebRTC manager
+      if (selectedDeviceId && webrtcManagerRef.current) {
+        const stream = webrtcManagerRef.current.getRemoteStream(selectedDeviceId)
+        if (stream) {
+          console.log('🎥 Found remoteStream from WebRTC manager, attaching...')
+          videoRef.current.srcObject = stream
+          const play = async () => {
+            try {
+              await videoRef.current?.play()
+              console.log('🎥 Video play successful after re-attach from WebRTC manager')
+            } catch (e) {
+              console.warn('Tự phát video bị chặn, sẽ phát khi người dùng tương tác', e)
+            }
+          }
+          play()
+        } else {
+          console.warn('🎥 No remoteStream found in WebRTC manager either')
+        }
+      }
     }
-  }, [remoteStream])
+  }, [remoteStream, selectedDeviceId, videoKey]) // Re-attach when video element is re-rendered
+
 
   const sendStreamRequest = useCallback((deviceId: string) => {
     if (!isConnected) return
@@ -235,8 +261,57 @@ function App() {
         break
 
       case 'DEVICE_SCREEN_INFO':
+        console.log('📱 Received DEVICE_SCREEN_INFO:', message)
         if (selectedDeviceId && message.deviceId === selectedDeviceId && message.data) {
-          setPhysicalSize({ width: message.data.width, height: message.data.height })
+          const newPhysicalSize = { width: message.data.width, height: message.data.height }
+          console.log('📱 Screen size updated:', newPhysicalSize, 'for device:', selectedDeviceId)
+          
+          // Check if this is a significant size change (orientation change)
+          const currentSize = physicalSize
+          const isOrientationChange = currentSize && 
+            (Math.abs(newPhysicalSize.width - currentSize.width) > 100 || 
+             Math.abs(newPhysicalSize.height - currentSize.height) > 100)
+          
+          if (isOrientationChange) {
+            console.log('🔄 Orientation change detected, updating UI...')
+            console.log('🔄 Current size:', currentSize, 'New size:', newPhysicalSize)
+            // Show orientation changing state
+            setIsOrientationChanging(true)
+            setIsStreamReady(false)
+            
+            // Clear pointer states to avoid coordinate mapping issues
+            clearAllPointerStates()
+            
+            // Update physical size first
+            setPhysicalSize(newPhysicalSize)
+            console.log('🔄 Physical size updated to:', newPhysicalSize)
+            
+            // Clear video size to force using physical size (but keep it for now to avoid black screen)
+            // setVideoSize(null)
+            // console.log('🔄 Video size cleared to force using physical size')
+            
+            // Brief delay to allow UI to update, then restore stream ready state
+            setTimeout(() => {
+              // Check if stream is still available before restoring ready state
+              const hasStream = videoRef.current?.srcObject || (selectedDeviceId && webrtcManagerRef.current?.getRemoteStream(selectedDeviceId))
+              if (hasStream) {
+                setIsOrientationChanging(false)
+                setIsStreamReady(true)
+                console.log('🔄 Orientation change UI update completed - stream preserved')
+              } else {
+                console.warn('🔄 Stream lost during orientation change, keeping loading state')
+                // Try to re-request stream
+                if (selectedDeviceId) {
+                  console.log('🔄 Attempting to re-request stream...')
+                  sendStreamRequest(selectedDeviceId)
+                }
+              }
+            }, 200)
+          } else {
+            // Minor size change, just update without loading state
+            console.log('📏 Minor size change, updating without loading state')
+            setPhysicalSize(newPhysicalSize)
+          }
         }
         break
     }
@@ -378,21 +453,79 @@ function App() {
     }
   }, [remoteStream, physicalSize])
 
-  const baseSize = videoSize ?? physicalSize
+  // When physicalSize is available (from DEVICE_SCREEN_INFO), prioritize it over videoSize
+  // This ensures correct display when orientation changes
+  const baseSize = physicalSize ?? videoSize
 
   const renderedVideoSize = useMemo(() => {
     if (!baseSize) return null
+    console.log('🎨 Calculating rendered size from baseSize:', baseSize, 'videoSize:', videoSize, 'physicalSize:', physicalSize)
     const maxWidth = window.innerWidth * 0.9
     const maxHeight = window.innerHeight * 0.8
     const scale = Math.min(maxWidth / baseSize.width, maxHeight / baseSize.height, 1)
-    return {
+    const result = {
       width: Math.round(baseSize.width * scale),
       height: Math.round(baseSize.height * scale)
     }
-  }, [baseSize])
+    console.log('🎨 Rendered size calculated:', result, 'scale:', scale, 'maxWidth:', maxWidth, 'maxHeight:', maxHeight)
+    return result
+  }, [baseSize, videoSize, physicalSize])
 
   const displayWidth = renderedVideoSize?.width ?? baseSize?.width ?? 320
   const displayHeight = renderedVideoSize?.height ?? baseSize?.height ?? 568
+
+  // Additional effect to ensure video element is properly sized when physicalSize changes
+  useEffect(() => {
+    if (videoRef.current && physicalSize && isStreamReady) {
+      console.log('🎥 Physical size changed, ensuring video element is properly sized')
+      console.log('🎥 Container size:', { width: displayWidth, height: displayHeight })
+      console.log('🎥 Physical size:', physicalSize)
+      console.log('🎥 Video element size:', { 
+        width: videoRef.current.offsetWidth, 
+        height: videoRef.current.offsetHeight 
+      })
+      
+      // Force a re-layout by temporarily changing and restoring the video element
+      const video = videoRef.current
+      const currentSrc = video.srcObject
+      if (currentSrc) {
+        // Trigger a re-layout without losing the stream
+        video.style.width = '99%'
+        setTimeout(() => {
+          video.style.width = '100%'
+          console.log('🎥 Video element re-layout completed')
+        }, 10)
+      }
+    }
+  }, [physicalSize, isStreamReady, displayWidth, displayHeight])
+
+  // Force video element to re-render when container size changes
+  useEffect(() => {
+    if (isStreamReady && (displayWidth > 0 && displayHeight > 0)) {
+      console.log('🎥 Container size changed, forcing video re-render')
+      setVideoKey(prev => prev + 1)
+    }
+  }, [displayWidth, displayHeight, isStreamReady])
+
+  // Add smooth transition for video size changes
+  const videoContainerStyle = useMemo(() => ({
+    background: '#000',
+    position: 'relative' as const,
+    overflow: 'hidden',
+    minWidth: displayWidth,
+    minHeight: displayHeight,
+    width: displayWidth,
+    height: displayHeight,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: isStreamReady ? 'pointer' : 'default',
+    touchAction: 'none' as const,
+    outline: 'none',
+    borderRadius: '12px', // Bo tròn 4 góc
+    transition: 'width 0.3s ease, height 0.3s ease', // Smooth transition
+    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)' // Add shadow for depth
+  }), [displayWidth, displayHeight, isStreamReady])
 
   const dispatchPointerCommand = useCallback((command: {
     type: 'POINTER'
@@ -477,10 +610,19 @@ function App() {
     const rawYRatio = (event.clientY - bounds.top) / bounds.height
     const xRatio = Math.min(Math.max(rawXRatio, 0), 1)
     const yRatio = Math.min(Math.max(rawYRatio, 0), 1)
+    
+    // Always use physicalSize if available for accurate mapping
     const targetSize = physicalSize ?? baseSize
+    if (!targetSize) {
+      console.warn('[WEB][Mouse] No target size available for coordinate mapping')
+      return
+    }
+    
     const x = Math.round(targetSize.width * xRatio)
     const y = Math.round(targetSize.height * yRatio)
     const now = Date.now()
+
+    console.log(`[WEB][Mouse] DOWN at screen (${x}, ${y}) from ratio (${xRatio.toFixed(3)}, ${yRatio.toFixed(3)}) with target size ${targetSize.width}x${targetSize.height}`)
 
     const pointerState: PointerState = {
       pointerId,
@@ -518,7 +660,13 @@ function App() {
     const bounds = videoContainerRef.current.getBoundingClientRect()
     if (bounds.width === 0 || bounds.height === 0) return
 
+    // Always use physicalSize if available for accurate mapping
     const targetSize = physicalSize ?? baseSize
+    if (!targetSize) {
+      console.warn('[WEB][Mouse] No target size available for coordinate mapping')
+      return
+    }
+    
     const rawXRatio = (event.clientX - bounds.left) / bounds.width
     const rawYRatio = (event.clientY - bounds.top) / bounds.height
     const xRatio = Math.min(Math.max(rawXRatio, 0), 1)
@@ -572,10 +720,21 @@ function App() {
 
     const x = state.lastX
     const y = state.lastY
-    const xRatio = x / (physicalSize?.width ?? baseSize?.width ?? 1)
-    const yRatio = y / (physicalSize?.height ?? baseSize?.height ?? 1)
+    
+    // Always use physicalSize if available for accurate mapping
+    const targetSize = physicalSize ?? baseSize
+    if (!targetSize) {
+      console.warn('[WEB][Mouse] No target size available for coordinate mapping')
+      pointerStatesRef.current.delete(1)
+      return
+    }
+    
+    const xRatio = x / targetSize.width
+    const yRatio = y / targetSize.height
     const now = Date.now()
     const duration = Math.max(8, now - state.lastSentTime)
+
+    console.log(`[WEB][Mouse] UP at screen (${x}, ${y}) with target size ${targetSize.width}x${targetSize.height}`)
 
     dispatchPointerCommand({
       type: 'POINTER',
@@ -606,7 +765,13 @@ function App() {
       return
     }
 
+    // Always use physicalSize if available for accurate mapping
     const targetSize = physicalSize ?? baseSize
+    if (!targetSize) {
+      console.warn('[WEB][Wheel] No target size available for coordinate mapping')
+      return
+    }
+    
     const pointerId = SCROLL_POINTER_ID
     let state = pointerStatesRef.current.get(pointerId)
 
@@ -846,21 +1011,7 @@ function App() {
         >
           <div style={{ display: 'flex', justifyContent: 'center', position: 'relative' }}>
             <div
-              style={{
-                background: '#000',
-                position: 'relative',
-                overflow: 'hidden',
-                minWidth: displayWidth,
-                minHeight: displayHeight,
-                width: displayWidth,
-                height: displayHeight,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: isStreamReady ? 'pointer' : 'default',
-                touchAction: 'none',
-                outline: 'none'
-              }}
+              style={videoContainerStyle}
               ref={videoContainerRef}
               tabIndex={0}
               onMouseDown={handleMouseDown}
@@ -870,11 +1021,27 @@ function App() {
               onWheel={handleWheel}
             >
               {!isStreamReady && (
-                <div style={{ color: '#fff' }}>
-                  <Spin tip="Đang chờ thiết bị..." size="large" />
+                <div style={{ 
+                  color: '#fff', 
+                  display: 'flex', 
+                  flexDirection: 'column', 
+                  alignItems: 'center',
+                  gap: '12px'
+                }}>
+                  <Spin size="large" />
+                  <div style={{ 
+                    fontSize: '14px', 
+                    textAlign: 'center',
+                    maxWidth: '200px',
+                    lineHeight: '1.4'
+                  }}>
+                    {isOrientationChanging ? '🔄 Đang xoay màn hình...' : 
+                     physicalSize ? 'Đang cập nhật màn hình...' : 'Đang chờ thiết bị...'}
+                  </div>
                 </div>
               )}
               <video
+                key={videoKey}
                 ref={videoRef}
                 autoPlay
                 playsInline
@@ -883,7 +1050,8 @@ function App() {
                   display: isStreamReady ? 'block' : 'none',
                   width: '100%',
                   height: '100%',
-                  objectFit: 'contain'
+                  objectFit: 'cover', // Fill toàn bộ container thay vì contain
+                  borderRadius: '12px' // Bo tròn video element để match với container
                 }}
                 onLoadedMetadata={() => {
                   console.log('[WEB][Video] loadedmetadata, readyState=', videoRef.current?.readyState)

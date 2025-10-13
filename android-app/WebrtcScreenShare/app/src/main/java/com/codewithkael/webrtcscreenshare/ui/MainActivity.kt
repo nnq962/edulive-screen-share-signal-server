@@ -2,8 +2,11 @@ package com.codewithkael.webrtcscreenshare.ui
 
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
@@ -26,6 +29,13 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
 
     @Inject lateinit var webrtcServiceRepository: WebrtcServiceRepository
     private val capturePermissionRequestCode = 1
+    private val orientationCheckHandler = Handler(Looper.getMainLooper())
+    private val orientationCheckRunnable = object : Runnable {
+        override fun run() {
+            checkOrientationChange()
+            orientationCheckHandler.postDelayed(this, 1000) // Check every second
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -97,6 +107,9 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
 
         // Auto start screen capture
         startScreenCapture()
+        
+        // Start orientation change monitoring
+        startOrientationMonitoring()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -164,6 +177,45 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
             notificationLayout.isVisible = false
             disconnectBtn.isVisible = false
         }
+    }
+
+    private fun startOrientationMonitoring() {
+        orientationCheckHandler.post(orientationCheckRunnable)
+        Log.d("EDU_SCREEN", "🔄 Started orientation monitoring")
+    }
+
+    private fun stopOrientationMonitoring() {
+        orientationCheckHandler.removeCallbacks(orientationCheckRunnable)
+        Log.d("EDU_SCREEN", "🛑 Stopped orientation monitoring")
+    }
+
+    private fun checkOrientationChange() {
+        try {
+            Log.d("EDU_SCREEN", "🔍 MainActivity: Checking orientation change...")
+            // Get the MainRepository from the service and check for orientation changes
+            val mainRepository = WebrtcService.getMainRepository()
+            if (mainRepository != null) {
+                Log.d("EDU_SCREEN", "✅ MainRepository found, calling checkOrientationChange")
+                mainRepository.checkOrientationChange()
+            } else {
+                Log.w("EDU_SCREEN", "⚠️ MainRepository is null, cannot check orientation change")
+            }
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error checking orientation change: ${e.message}", e)
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        Log.d("EDU_SCREEN", "🔄 Configuration changed: orientation = ${newConfig.orientation}")
+        Log.d("EDU_SCREEN", "🔄 Screen size: ${newConfig.screenWidthDp}x${newConfig.screenHeightDp}")
+        // Immediately check for orientation change when configuration changes
+        checkOrientationChange()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopOrientationMonitoring()
     }
 
 }

@@ -2,6 +2,7 @@ package com.codewithkael.webrtcscreenshare.webrtc
 
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.media.projection.MediaProjection
 import android.os.Build
 import android.util.DisplayMetrics
@@ -10,6 +11,7 @@ import android.view.WindowManager
 import com.codewithkael.webrtcscreenshare.utils.DataModel
 import com.codewithkael.webrtcscreenshare.utils.DataModelType
 import com.codewithkael.webrtcscreenshare.socket.SocketClient
+import com.codewithkael.webrtcscreenshare.config.AppConfig
 import com.google.gson.Gson
 import org.webrtc.*
 import org.webrtc.PeerConnection.Observer
@@ -46,6 +48,9 @@ class WebrtcClient @Inject constructor(
     private var localVideoTrack:VideoTrack?=null
     private var localStream: MediaStream?=null
     private var isSurfaceInitialized: Boolean = false
+    private var currentScreenWidth: Int = 0
+    private var currentScreenHeight: Int = 0
+    private var lastOrientation: Int = Configuration.ORIENTATION_UNDEFINED
 
     
     init {
@@ -104,23 +109,20 @@ class WebrtcClient @Inject constructor(
             val realWidth = realMetrics.widthPixels
             val realHeight = realMetrics.heightPixels
 
+            // Update current screen size and orientation
+            currentScreenWidth = realWidth
+            currentScreenHeight = realHeight
+            lastOrientation = getCurrentOrientation()
+
             val appMetrics = DisplayMetrics()
             windowManager.defaultDisplay.getMetrics(appMetrics)
             Log.d(
                 "EDU_SCREEN",
-                "📱 Screen size (physical): ${realWidth}x${realHeight} | app window: ${appMetrics.widthPixels}x${appMetrics.heightPixels}"
+                "📱 Screen size (physical): ${realWidth}x${realHeight} | orientation: $lastOrientation | app window: ${appMetrics.widthPixels}x${appMetrics.heightPixels}"
             )
 
-            socketClient.sendMessageToSocket(
-                DataModel(
-                    type = "DEVICE_SCREEN_INFO",
-                    deviceId = username,
-                    data = mapOf(
-                        "width" to realWidth,
-                        "height" to realHeight
-                    )
-                )
-            )
+            // Send initial screen info
+            sendScreenInfoToWeb(realWidth, realHeight)
 
             Log.d("EDU_SCREEN", "🔄 Creating surface texture helper")
             val surfaceTextureHelper = SurfaceTextureHelper.create(
@@ -281,6 +283,77 @@ class WebrtcClient @Inject constructor(
             it.release()
             initializeWebrtcClient(username,it,observer)
         }
+    }
+
+    fun checkOrientationChange() {
+        val currentOrientation = getCurrentOrientation()
+        Log.d("EDU_SCREEN", "🔍 Checking orientation: current=$currentOrientation, last=$lastOrientation")
+        if (currentOrientation != lastOrientation) {
+            Log.d("EDU_SCREEN", "🔄 Orientation changed from $lastOrientation to $currentOrientation")
+            handleOrientationChange()
+            lastOrientation = currentOrientation
+        } else {
+            Log.d("EDU_SCREEN", "📱 No orientation change detected")
+        }
+    }
+
+    private fun handleOrientationChange() {
+        try {
+            val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val realMetrics = DisplayMetrics()
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+                windowManager.defaultDisplay.getRealMetrics(realMetrics)
+            } else {
+                windowManager.defaultDisplay.getMetrics(realMetrics)
+            }
+            
+            val newWidth = realMetrics.widthPixels
+            val newHeight = realMetrics.heightPixels
+            
+            if (newWidth != currentScreenWidth || newHeight != currentScreenHeight) {
+                Log.d("EDU_SCREEN", "📱 Screen size changed from ${currentScreenWidth}x${currentScreenHeight} to ${newWidth}x${newHeight}")
+                
+                currentScreenWidth = newWidth
+                currentScreenHeight = newHeight
+                
+                // Send new screen info to web client
+                sendScreenInfoToWeb(newWidth, newHeight)
+                
+                // Note: We don't restart screen capture to avoid MediaProjection permission issues
+                // The existing capture will continue with the same resolution but web UI will adjust
+                Log.d("EDU_SCREEN", "📤 Screen info sent to web client, capture continues with existing resolution")
+            }
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error handling orientation change: ${e.message}", e)
+        }
+    }
+
+    private fun getCurrentOrientation(): Int {
+        return context.resources.configuration.orientation
+    }
+
+    private fun sendScreenInfoToWeb(width: Int, height: Int) {
+        if (username.isBlank()) {
+            Log.w("EDU_SCREEN", "⚠️ Username is blank, cannot send screen info")
+            return
+        }
+        
+        // Use the same deviceId that was used for registration
+        val deviceId = AppConfig.FIXED_DEVICE_ID.ifBlank { username }
+        
+        val dataModel = DataModel(
+            type = "DEVICE_SCREEN_INFO",
+            deviceId = deviceId,
+            data = mapOf(
+                "width" to width,
+                "height" to height
+            )
+        )
+        
+        Log.d("EDU_SCREEN", "📤 Sending screen info: type=${dataModel.type}, deviceId=${dataModel.deviceId}, data=${dataModel.data}")
+        socketClient.sendMessageToSocket(dataModel)
+        Log.d("EDU_SCREEN", "✅ Screen info sent to web: ${width}x${height} for device: $deviceId")
     }
 
 
