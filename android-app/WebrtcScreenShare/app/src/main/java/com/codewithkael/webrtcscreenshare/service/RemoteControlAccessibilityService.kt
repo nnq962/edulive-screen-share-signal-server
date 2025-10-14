@@ -19,6 +19,7 @@ import com.codewithkael.webrtcscreenshare.utils.RemoteControlCommand
  * AccessibilityService for remote control touch gestures
  * Focused only on touch/gesture handling, no keyboard support
  */
+@RequiresApi(Build.VERSION_CODES.O)
 class RemoteControlAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -47,6 +48,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     private lateinit var pointerManager: PointerManager
     private lateinit var simpleGestureHandler: SimpleGestureHandler
 
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         serviceInstance = this
@@ -57,7 +59,9 @@ class RemoteControlAccessibilityService : AccessibilityService() {
             pointerManager = PointerManager(dispatcher)
         }
         simpleGestureHandler = SimpleGestureHandler(this)
-        
+        keyboardHelper.setup {
+            getRootInActiveWindow()
+        }
         Log.d(TAG, "✅ AccessibilityService connected")
     }
 
@@ -90,17 +94,18 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     /**
      * Handle incoming control command
      */
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun handleCommand(command: RemoteControlCommand) {
         val metrics = getScreenMetrics()
 
         when (command.type.uppercase()) {
             "POINTER" -> handlePointerCommand(command, metrics)
+            "KEYBOARD" -> keyboardHelper.handleKeyboardCommand(command)
             "TAP" -> handleTapCommand(command, metrics)
             "SWIPE" -> handleSwipeCommand(command, metrics)
             else -> Log.w(TAG, "⚠️ Unknown command type: ${command.type}")
         }
     }
-
     /**
      * Handle streaming pointer commands (DOWN, MOVE, UP, CANCEL)
      */

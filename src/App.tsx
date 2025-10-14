@@ -21,6 +21,19 @@ interface PointerState {
   downTime: number
 }
 
+type KeyboardCommand = {
+  type: 'KEYBOARD'
+  action: 'INSERT_TEXT' | 'BACKSPACE' | 'ENTER' | 'TAB' | 'DELETE' | 'ARROW_UP' | 'ARROW_DOWN' | 'ARROW_LEFT' | 'ARROW_RIGHT' | string
+  text?: string
+  key?: string
+  code?: string
+  keyCode?: number
+  altKey?: boolean
+  ctrlKey?: boolean
+  shiftKey?: boolean
+  metaKey?: boolean
+}
+
 // Reduced constants for mouse-only control
 const MOUSE_MOVE_THROTTLE_MS = 32 // Send MOVE at most every 32ms (30fps)
 const SCROLL_POINTER_ID = -1
@@ -180,6 +193,199 @@ function App() {
     }
   }, [selectedDeviceId, devices])
 
+  // handle keyboard events
+  const shouldCaptureKeyboard = isModalOpen && isStreamReady && !!selectedDeviceId
+
+  
+  const dispatchKeyboardCommand = useCallback((command: KeyboardCommand) => {
+    if (!selectedDeviceId) return
+    
+    // Log keyboard commands for debugging
+    console.log(`[WEB][Keyboard] ${command.action}`, {
+      key: command.key,
+      code: command.code,
+      modifiers: {
+        ctrl: command.ctrlKey,
+        alt: command.altKey,
+        shift: command.shiftKey,
+        meta: command.metaKey
+      }
+    })
+    
+    try {
+      sendMessage({
+        type: 'CONTROL_COMMAND',
+        deviceId: selectedDeviceId,
+        data: command
+      } as any)
+    } catch (error) {
+      console.error('[WEB][Control] Failed to send keyboard command', error)
+    }
+  }, [selectedDeviceId, sendMessage])
+
+  const handlePasteEvent = useCallback((event: ClipboardEvent) => {
+    if (!shouldCaptureKeyboard) return
+
+    const target = event.target as HTMLElement | null
+    if (target) {
+      const tagName = target.tagName
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || target.isContentEditable) {
+        return
+      }
+    }
+
+    const text = event.clipboardData?.getData('text')
+    if (!text) {
+      return
+    }
+
+    event.preventDefault()
+    dispatchKeyboardCommand({
+      type: 'KEYBOARD',
+      action: 'INSERT_TEXT',
+      text,
+      key: 'Paste',
+      code: 'Paste'
+    })
+  }, [dispatchKeyboardCommand, shouldCaptureKeyboard])
+
+  const handleKeyDown = useCallback((event: KeyboardEvent) => {
+    if (!shouldCaptureKeyboard) return
+
+    const target = event.target as HTMLElement | null
+    if (target) {
+      const tagName = target.tagName
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || target.isContentEditable) {
+        return
+      }
+    }
+
+    const key = event.key
+    const printable = key.length === 1 && !event.ctrlKey && !event.metaKey
+
+    const modifiers = {
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey
+    }
+
+    const baseCommand = {
+      type: 'KEYBOARD' as const,
+      key,
+      code: event.code,
+      keyCode: event.keyCode,
+      ...modifiers
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      if (event.key.toLowerCase() !== 'v') {
+        return
+      }
+    }
+
+    if (key === 'Backspace') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'BACKSPACE'
+      })
+      return
+    }
+
+    if (key === 'Enter') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'ENTER'
+      })
+      return
+    }
+
+    if (key === 'Tab') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'TAB'
+      })
+      return
+    }
+
+    // Handle Delete key
+    if (key === 'Delete') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'DELETE'
+      })
+      return
+    }
+
+    // Handle Arrow keys
+    if (key === 'ArrowUp') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'ARROW_UP'
+      })
+      return
+    }
+
+    if (key === 'ArrowDown') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'ARROW_DOWN'
+      })
+      return
+    }
+
+    if (key === 'ArrowLeft') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'ARROW_LEFT'
+      })
+      return
+    }
+
+    if (key === 'ArrowRight') {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'ARROW_RIGHT'
+      })
+      return
+    }
+
+    if (printable) {
+      event.preventDefault()
+      dispatchKeyboardCommand({
+        ...baseCommand,
+        action: 'INSERT_TEXT',
+        text: key
+      })
+      return
+    }
+  }, [dispatchKeyboardCommand, shouldCaptureKeyboard])
+
+
+  useEffect(() => {
+      if (!shouldCaptureKeyboard) return
+
+      const keyListener = (event: KeyboardEvent) => handleKeyDown(event)
+      const pasteListener = (event: ClipboardEvent) => handlePasteEvent(event)
+
+      window.addEventListener('keydown', keyListener, true)
+      window.addEventListener('paste', pasteListener, true)
+
+      return () => {
+        window.removeEventListener('keydown', keyListener, true)
+        window.removeEventListener('paste', pasteListener, true)
+      }
+    }, [handleKeyDown, handlePasteEvent, shouldCaptureKeyboard])
+
+  // end handle keyboard events
   function handleWebSocketMessage(message: any) {
     console.log('WebSocket message received:', message)
 
