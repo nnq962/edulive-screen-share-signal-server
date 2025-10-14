@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">WebrtcScreenShare</string>
     <string name="accessibility_service_description">Cho phép điều khiển thiết bị từ xa thông qua dịch vụ truy cập</string>
+    <string name="media_projection_accessibility_service_description">Tự động chấp nhận quyền chia sẻ màn hình khi ứng dụng yêu cầu Media Projection. Dịch vụ này sẽ tự động nhấn nút \"Bắt đầu ngay\" để bạn không phải thao tác thủ công.</string>
 </resources>
