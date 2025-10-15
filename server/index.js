@@ -51,6 +51,15 @@ const MessageTypes = {
   DEVICES_LIST: 'DEVICES_LIST',
   HEARTBEAT: 'HEARTBEAT',
   
+  // Internal Audio
+  INTERNAL_AUDIO: 'INTERNAL_AUDIO',
+  DEVICE_SCREEN_INFO: 'DEVICE_SCREEN_INFO',
+  
+  // Control commands
+  CONTROL_COMMAND: 'CONTROL_COMMAND',
+  REQUEST_STREAM: 'REQUEST_STREAM',
+  STOP_STREAM: 'STOP_STREAM',
+  
   // Error handling
   ERROR: 'ERROR'
 };
@@ -117,6 +126,26 @@ function handleMessage(ws, message) {
       
     case MessageTypes.ICE_CANDIDATE:
       handleIceCandidate(ws, message);
+      break;
+      
+    case MessageTypes.INTERNAL_AUDIO:
+      handleInternalAudio(ws, message);
+      break;
+      
+    case MessageTypes.DEVICE_SCREEN_INFO:
+      handleDeviceScreenInfo(ws, message);
+      break;
+      
+    case MessageTypes.CONTROL_COMMAND:
+      handleControlCommand(ws, message);
+      break;
+      
+    case MessageTypes.REQUEST_STREAM:
+      handleRequestStream(ws, message);
+      break;
+      
+    case MessageTypes.STOP_STREAM:
+      handleStopStream(ws, message);
       break;
       
     default:
@@ -286,6 +315,117 @@ function handleIceCandidate(ws, message) {
       fromViewer: true
     }));
   }
+}
+
+function handleInternalAudio(ws, message) {
+  const { deviceId, data } = message;
+  console.log('🎵 [SERVER] INTERNAL_AUDIO received from device:', deviceId);
+  console.log('🎵 [SERVER] Audio data keys:', data ? Object.keys(data) : 'NO DATA');
+  console.log('🎵 [SERVER] Viewers count:', viewers.size);
+  
+  const device = devices.get(deviceId);
+  
+  if (!device) {
+    console.warn('❌ [SERVER] Internal audio from unknown device:', deviceId);
+    return;
+  }
+  
+  console.log('✅ [SERVER] Device found, broadcasting to', viewers.size, 'viewers');
+  
+  // Forward internal audio to all viewers watching this device
+  const audioMessage = {
+    type: MessageTypes.INTERNAL_AUDIO,
+    deviceId: deviceId,
+    data: data
+  };
+  
+  let sentCount = 0;
+  viewers.forEach(viewer => {
+    try {
+      viewer.connection.send(JSON.stringify(audioMessage));
+      sentCount++;
+    } catch (error) {
+      console.error('❌ [SERVER] Error sending audio to viewer:', error);
+    }
+  });
+  
+  console.log(`✅ [SERVER] Audio broadcast to ${sentCount}/${viewers.size} viewers`);
+}
+
+function handleDeviceScreenInfo(ws, message) {
+  const { deviceId, data } = message;
+  const device = devices.get(deviceId);
+  
+  if (!device) {
+    console.warn('Screen info from unknown device:', deviceId);
+    return;
+  }
+  
+  // Update device screen info
+  if (data && data.width && data.height) {
+    device.deviceInfo.screenWidth = data.width;
+    device.deviceInfo.screenHeight = data.height;
+  }
+  
+  // Forward to viewers
+  broadcastToViewers({
+    type: MessageTypes.DEVICE_SCREEN_INFO,
+    deviceId: deviceId,
+    data: data
+  });
+}
+
+function handleControlCommand(ws, message) {
+  const { deviceId, data } = message;
+  const device = devices.get(deviceId);
+  
+  if (!device) {
+    sendError(ws, 'Target device not found');
+    return;
+  }
+  
+  // Forward control command to device
+  device.connection.send(JSON.stringify({
+    type: MessageTypes.CONTROL_COMMAND,
+    data: data
+  }));
+}
+
+function handleRequestStream(ws, message) {
+  const { deviceId } = message;
+  const device = devices.get(deviceId);
+  
+  if (!device) {
+    sendError(ws, 'Device not found');
+    return;
+  }
+  
+  // Generate viewer ID for this request
+  const viewerId = uuidv4();
+  
+  // Notify device to start streaming
+  device.connection.send(JSON.stringify({
+    type: MessageTypes.REQUEST_STREAM,
+    viewerId: viewerId
+  }));
+  
+  console.log(`Viewer requested stream from device ${deviceId}`);
+}
+
+function handleStopStream(ws, message) {
+  const { deviceId } = message;
+  const device = devices.get(deviceId);
+  
+  if (!device) {
+    return;
+  }
+  
+  // Notify device to stop streaming
+  device.connection.send(JSON.stringify({
+    type: MessageTypes.STOP_STREAM
+  }));
+  
+  console.log(`Viewer stopped stream from device ${deviceId}`);
 }
 
 function handleDisconnection(ws) {

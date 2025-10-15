@@ -2,6 +2,7 @@ import { Typography, Alert, Space, Row, Col, Card, Modal, Tag, Layout, Spin } fr
 import { CheckCircleTwoTone } from '@ant-design/icons'
 import { useWebSocket } from './hooks/useWebSocket'
 import { WebRTCManager } from './utils/webrtc'
+import { InternalAudioPlayer } from './utils/internalAudio'
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 
 const { Text } = Typography
@@ -60,6 +61,9 @@ function App() {
   const [videoKey, setVideoKey] = useState(0) // Force re-render when container size changes
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const pointerStatesRef = useRef<Map<number, PointerState>>(new Map())
+  
+  // Internal Audio Player
+  const audioPlayerRef = useRef<InternalAudioPlayer | null>(null)
 
   // WebSocket connection
   const {
@@ -75,7 +79,7 @@ function App() {
     onClose: handleWebSocketClose
   })
 
-  // Initialize WebRTC Manager
+  // Initialize WebRTC Manager and Internal Audio Player
   useEffect(() => {
     if (!webrtcManagerRef.current) {
       webrtcManagerRef.current = new WebRTCManager()
@@ -99,8 +103,16 @@ function App() {
         }
       }
     }
+    
+    // Initialize Internal Audio Player
+    if (!audioPlayerRef.current) {
+      audioPlayerRef.current = new InternalAudioPlayer()
+      console.log('🎧 Internal Audio Player initialized')
+    }
+    
     return () => {
       webrtcManagerRef.current?.cleanup()
+      audioPlayerRef.current?.close()
     }
   }, [selectedDeviceId])
 
@@ -492,10 +504,6 @@ function App() {
             setPhysicalSize(newPhysicalSize)
             console.log('🔄 Physical size updated to:', newPhysicalSize)
             
-            // Clear video size to force using physical size (but keep it for now to avoid black screen)
-            // setVideoSize(null)
-            // console.log('🔄 Video size cleared to force using physical size')
-            
             // Brief delay to allow UI to update, then restore stream ready state
             setTimeout(() => {
               // Check if stream is still available before restoring ready state
@@ -517,6 +525,46 @@ function App() {
             // Minor size change, just update without loading state
             console.log('📏 Minor size change, updating without loading state')
             setPhysicalSize(newPhysicalSize)
+          }
+        }
+        break
+        
+      case 'INTERNAL_AUDIO':
+        // Handle internal audio from Android device
+        console.log('🎵 Received INTERNAL_AUDIO message:', {
+          deviceId: message.deviceId,
+          selectedDeviceId,
+          hasData: !!message.data,
+          dataKeys: message.data ? Object.keys(message.data) : []
+        })
+        
+        if (selectedDeviceId && message.deviceId === selectedDeviceId && message.data) {
+          const { audioData, sampleRate, channels } = message.data
+          console.log('🎵 Audio data details:', {
+            hasAudioData: !!audioData,
+            audioDataLength: audioData?.length || 0,
+            sampleRate,
+            channels,
+            playerReady: !!audioPlayerRef.current
+          })
+          
+          if (audioPlayerRef.current && audioData) {
+            // Ensure AudioContext is resumed
+            audioPlayerRef.current.resume()
+            audioPlayerRef.current.processAudioData(audioData, sampleRate || 44100, channels || 2)
+            console.log('🎵 Audio data processed successfully')
+          } else if (!audioData) {
+            console.warn('⚠️ Audio data is missing in message')
+          } else if (!audioPlayerRef.current) {
+            console.warn('⚠️ Audio player not initialized')
+          }
+        } else {
+          if (!selectedDeviceId) {
+            console.warn('⚠️ No device selected, ignoring audio')
+          } else if (message.deviceId !== selectedDeviceId) {
+            console.warn('⚠️ Audio from different device, ignoring')
+          } else if (!message.data) {
+            console.warn('⚠️ No data in INTERNAL_AUDIO message')
           }
         }
         break
@@ -638,6 +686,9 @@ function App() {
     if (stream && videoRef.current?.videoWidth && videoRef.current?.videoHeight) {
       setVideoSize({ width: videoRef.current.videoWidth, height: videoRef.current.videoHeight })
     }
+    
+    // Resume audio context on user interaction
+    audioPlayerRef.current?.resume()
   }
 
   useEffect(() => {
@@ -1091,6 +1142,9 @@ function App() {
     setIsStreamReady(false)
     setVideoSize(null)
     clearAllPointerStates()
+    
+    // Clear audio queue when closing modal
+    audioPlayerRef.current?.clear()
   }
 
   return (

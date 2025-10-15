@@ -1,7 +1,9 @@
 package com.codewithkael.webrtcscreenshare.repository
 
 import android.content.Intent
+import android.os.Build
 import android.util.Log
+import com.codewithkael.webrtcscreenshare.audio.InternalAudioCapturer
 import com.codewithkael.webrtcscreenshare.socket.SocketClient
 import com.codewithkael.webrtcscreenshare.utils.DataModel
 import com.codewithkael.webrtcscreenshare.utils.RemoteControlCommand
@@ -26,6 +28,8 @@ class MainRepository @Inject constructor(
     var listener: Listener? = null
     private var isStreaming = false
     private var isScreenCapturing = false
+    private var internalAudioCapturer: InternalAudioCapturer? = null
+    private var mediaProjection: android.media.projection.MediaProjection? = null
 
     fun init(username: String, surfaceView: SurfaceViewRenderer, wsUrl: String = "ws://192.168.1.101:3001/ws") {
         this.username = username
@@ -43,6 +47,78 @@ class MainRepository @Inject constructor(
 
     fun setPermissionIntentToWebrtcClient(intent:Intent){
         webrtcClient.setPermissionIntent(intent)
+        
+        // Get MediaProjection for internal audio
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val mediaProjectionManager = android.content.Context.MEDIA_PROJECTION_SERVICE.let { service ->
+                    // We'll get MediaProjection from Service later
+                }
+                Log.d("EDU_SCREEN", "🎧 MediaProjection will be set from Service")
+            } catch (e: Exception) {
+                Log.e("EDU_SCREEN", "❌ Failed to prepare MediaProjection: ${e.message}", e)
+            }
+        }
+    }
+    
+    fun setMediaProjectionForAudio(projection: android.media.projection.MediaProjection) {
+        Log.d("EDU_SCREEN", "🎧 setMediaProjectionForAudio() called")
+        this.mediaProjection = projection
+        Log.d("EDU_SCREEN", "🎧 MediaProjection stored")
+        
+        // Delay audio capture start to avoid conflict with WebRTC
+        Log.d("EDU_SCREEN", "🎧 Delaying audio capture start by 2 seconds to let WebRTC stabilize...")
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            Log.d("EDU_SCREEN", "🎧 Starting internal audio capture after delay")
+            startInternalAudioCapture()
+            Log.d("EDU_SCREEN", "🎧 startInternalAudioCapture() completed")
+        }, 2000) // 2 second delay
+    }
+    
+    private fun startInternalAudioCapture() {
+        Log.d("EDU_SCREEN", "🎧 startInternalAudioCapture() method entered")
+        Log.d("EDU_SCREEN", "🎧 Android SDK: ${Build.VERSION.SDK_INT}")
+        
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Log.w("EDU_SCREEN", "⚠️ Internal audio requires Android 10+ (SDK >= 29, current: ${Build.VERSION.SDK_INT})")
+            return
+        }
+        
+        Log.d("EDU_SCREEN", "✅ Android version check passed")
+        
+        if (mediaProjection == null) {
+            Log.w("EDU_SCREEN", "⚠️ MediaProjection not set, cannot capture internal audio")
+            return
+        }
+        
+        Log.d("EDU_SCREEN", "✅ MediaProjection is available")
+        
+        try {
+            Log.d("EDU_SCREEN", "🎧 Stopping previous audio capture if exists...")
+            stopInternalAudioCapture() // Stop if already running
+            
+            Log.d("EDU_SCREEN", "🎧 Creating InternalAudioCapturer instance...")
+            internalAudioCapturer = InternalAudioCapturer(mediaProjection!!) { audioData, sampleRate, channels ->
+                // Send audio data via WebSocket
+                socketClient.sendInternalAudio(audioData, sampleRate, channels)
+            }
+            
+            Log.d("EDU_SCREEN", "🎧 Calling startCapture()...")
+            val success = internalAudioCapturer?.startCapture() ?: false
+            if (success) {
+                Log.d("EDU_SCREEN", "✅ Internal audio capture started successfully!")
+            } else {
+                Log.e("EDU_SCREEN", "❌ Failed to start internal audio capture - startCapture() returned false")
+            }
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Exception in startInternalAudioCapture: ${e.message}", e)
+            e.printStackTrace()
+        }
+    }
+    
+    private fun stopInternalAudioCapture() {
+        internalAudioCapturer?.stopCapture()
+        internalAudioCapturer = null
     }
 
     fun sendScreenShareConnection(target: String){
@@ -148,11 +224,13 @@ class MainRepository @Inject constructor(
     }
 
     fun onDestroy(){
+        stopInternalAudioCapture()
         socketClient.onDestroy()
         webrtcClient.closeConnection()
         activeViewerId = null
         isStreaming = false
         isScreenCapturing = false
+        mediaProjection = null
     }
 
     fun checkOrientationChange() {

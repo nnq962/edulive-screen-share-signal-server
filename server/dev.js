@@ -142,6 +142,10 @@ function handleMessage(ws, message) {
       handleControlCommand(ws, message);
       break;
 
+    case 'INTERNAL_AUDIO':
+      handleInternalAudio(ws, message);
+      break;
+
     case MessageTypes.OFFER:
       handleOffer(ws, message);
       break;
@@ -406,6 +410,41 @@ function handleControlCommand(ws, message) {
   } catch (error) {
     console.error(`❌ Failed to forward control command to device ${deviceId}:`, error.message);
   }
+}
+
+function handleInternalAudio(ws, message) {
+  const { deviceId, data } = message;
+  console.log('🎵 [SERVER] INTERNAL_AUDIO received from device:', deviceId);
+  console.log('🎵 [SERVER] Audio data keys:', data ? Object.keys(data) : 'NO DATA');
+  console.log('🎵 [SERVER] Viewers count:', viewers.size);
+  
+  const device = devices.get(deviceId);
+  
+  if (!device) {
+    console.warn('❌ [SERVER] Internal audio from unknown device:', deviceId);
+    return;
+  }
+  
+  console.log('✅ [SERVER] Device found, broadcasting to', viewers.size, 'viewers');
+  
+  // Forward internal audio to all viewers watching this device
+  const audioMessage = {
+    type: 'INTERNAL_AUDIO',
+    deviceId: deviceId,
+    data: data
+  };
+  
+  let sentCount = 0;
+  viewers.forEach(viewer => {
+    try {
+      viewer.connection.send(JSON.stringify(audioMessage));
+      sentCount++;
+    } catch (error) {
+      console.error('❌ [SERVER] Error sending audio to viewer:', error);
+    }
+  });
+  
+  console.log(`✅ [SERVER] Audio broadcast to ${sentCount}/${viewers.size} viewers`);
 }
 
 function handleDeviceScreenInfo(ws, message) {

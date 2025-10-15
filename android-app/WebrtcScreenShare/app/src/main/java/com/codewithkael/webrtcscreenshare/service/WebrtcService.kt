@@ -4,10 +4,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.codewithkael.webrtcscreenshare.R
 import com.codewithkael.webrtcscreenshare.repository.MainRepository
@@ -88,28 +91,96 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
                             return START_NOT_STICKY
                         }
                         mainRepository.setPermissionIntentToWebrtcClient(permission)
+                        
+                        // Start screen capturing FIRST
                         mainRepository.startScreenCapturing(view)
                         mainRepository.sendScreenShareConnection(it)
+                        
+                        // Setup audio AFTER screen capture with delay
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            Log.d("EDU_SCREEN", "🎧 Setting up audio for RequestConnectionIntent")
+                            setupMediaProjectionForAudio(permission)
+                        }, 1500)
                     }
                 }
                 "PrepareStreamingIntent"->{
+                    Log.d("EDU_SCREEN", "🚀 PrepareStreamingIntent started")
                     startServiceWithNotification()
 
                     val permission = screenPermissionIntent
                     val view = surfaceView
                     if (permission == null || view == null){
+                        Log.e("EDU_SCREEN", "❌ Permission or view is null - permission: ${permission != null}, view: ${view != null}")
                         stopMyService()
                         return START_NOT_STICKY
                     }
 
+                    Log.d("EDU_SCREEN", "✅ Permission and view are ready")
                     mainRepository.setPermissionIntentToWebrtcClient(permission)
+                    
+                    Log.d("EDU_SCREEN", "📹 Starting screen capturing FIRST")
                     mainRepository.startScreenCapturing(view)
+                    
+                    // IMPORTANT: Wait for screen capture to fully initialize its MediaProjection
+                    // before creating a second MediaProjection for audio
+                    // Use Handler to avoid blocking service thread
+                    Log.d("EDU_SCREEN", "⏰ Scheduling audio setup in 1.5 seconds...")
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        Log.d("EDU_SCREEN", "🎧 Now setting up MediaProjection for audio")
+                        setupMediaProjectionForAudio(permission)
+                    }, 1500) // 1.5 seconds delay
+                    
                     isStreaming = false
+                    Log.d("EDU_SCREEN", "✅ PrepareStreamingIntent completed (audio will start in 1.5s)")
                 }
             }
         }
 
         return START_STICKY
+    }
+
+    private fun setupMediaProjectionForAudio(permissionIntent: Intent) {
+        Log.d("EDU_SCREEN", "🎧 setupMediaProjectionForAudio() called")
+        Log.d("EDU_SCREEN", "🎧 Android SDK version: ${Build.VERSION.SDK_INT} (Need >= 29)")
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Log.d("EDU_SCREEN", "✅ Android version check passed (SDK >= 29)")
+            try {
+                Log.d("EDU_SCREEN", "🎧 Getting MediaProjectionManager...")
+                val mediaProjectionManager = getSystemService(
+                    Context.MEDIA_PROJECTION_SERVICE
+                ) as MediaProjectionManager
+                
+                Log.d("EDU_SCREEN", "🎧 Calling getMediaProjection()...")
+                val mediaProjection = mediaProjectionManager.getMediaProjection(
+                    android.app.Activity.RESULT_OK,
+                    permissionIntent
+                )
+                
+                if (mediaProjection != null) {
+                    Log.d("EDU_SCREEN", "✅ MediaProjection obtained successfully!")
+                    Log.d("EDU_SCREEN", "🎧 MediaProjection instance: ${System.identityHashCode(mediaProjection)}")
+                    
+                    // Add callback to monitor MediaProjection state
+                    mediaProjection.registerCallback(object : android.media.projection.MediaProjection.Callback() {
+                        override fun onStop() {
+                            super.onStop()
+                            Log.w("EDU_SCREEN", "⚠️ MediaProjection was stopped externally!")
+                        }
+                    }, null)
+                    
+                    mainRepository.setMediaProjectionForAudio(mediaProjection)
+                    Log.d("EDU_SCREEN", "✅ MediaProjection set for internal audio capture")
+                } else {
+                    Log.w("EDU_SCREEN", "⚠️ MediaProjection is null - internal audio not available")
+                }
+            } catch (e: Exception) {
+                Log.e("EDU_SCREEN", "❌ Failed to get MediaProjection: ${e.message}", e)
+                e.printStackTrace()
+            }
+        } else {
+            Log.w("EDU_SCREEN", "⚠️ Android 10+ required for internal audio (Current: SDK ${Build.VERSION.SDK_INT})")
+        }
     }
 
     private fun stopMyService(){

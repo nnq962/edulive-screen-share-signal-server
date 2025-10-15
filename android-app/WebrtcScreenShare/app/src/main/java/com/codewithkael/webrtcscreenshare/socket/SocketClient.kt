@@ -242,6 +242,38 @@ class SocketClient @Inject constructor(
             )
         )
     }
+    
+    private var audioChunkCount = 0L
+    private var lastAudioLogTime = 0L
+    
+    fun sendInternalAudio(audioData: String, sampleRate: Int, channels: Int) {
+        try {
+            if (webSocket?.isOpen == true) {
+                val message = DataModel(
+                    type = "INTERNAL_AUDIO",
+                    deviceId = deviceId,
+                    data = mapOf(
+                        "audioData" to audioData,
+                        "sampleRate" to sampleRate,
+                        "channels" to channels
+                    )
+                )
+                sendMessageToSocket(message)
+                audioChunkCount++
+                
+                // Log every 1 second
+                val now = System.currentTimeMillis()
+                if (now - lastAudioLogTime >= 1000) {
+                    android.util.Log.d("AUDIO_SEND", "📤 [AUDIO_ACTIVE] Sent chunk #$audioChunkCount: ${audioData.length} bytes, rate=$sampleRate, ch=$channels")
+                    lastAudioLogTime = now
+                }
+            } else {
+                android.util.Log.e("AUDIO_SEND", "❌ WebSocket not open! Audio dropped. Socket state: ${webSocket?.isOpen}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("AUDIO_SEND", "❌ Failed to send internal audio: ${e.message}", e)
+        }
+    }
 
     fun onDestroy(){
         webSocket?.close()
