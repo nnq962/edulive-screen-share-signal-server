@@ -1,29 +1,32 @@
 package com.codewithkael.webrtcscreenshare.service
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.RequiresApi
+import com.codewithkael.webrtcscreenshare.service.keyboard.TextHelper
 import com.codewithkael.webrtcscreenshare.utils.RemoteControlCommand
-import kotlinx.coroutines.*
-import kotlin.collections.set
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @RequiresApi(Build.VERSION_CODES.O)
 object keyboardHelper {
-    private val toneKeyMap = mapOf(
-        's' to 1,
-        'f' to 2,
-        'r' to 3,
-        'x' to 4,
-        'j' to 5
-    )
-
-    private val vowelDecodeMap = HashMap<Char, VowelInfo>()
-    private val vowelEncodeMap = HashMap<VowelKey, Char>()
 
     private var getRootInActiveWindow: (() -> AccessibilityNodeInfo)? = null
+    private var clipboardManager: ClipboardManager? = null
+    private var applicationContext: Context? = null
 
     // Coroutine-based Queue Text Processing System
     private val eventQueue = mutableListOf<TextEvent>()
@@ -34,15 +37,28 @@ object keyboardHelper {
 
     // Coroutine scope for async processing
     private val processingScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    
+
     // Background sync job for periodic node sync
     private var backgroundSyncJob: Job? = null
-    
+
+    // Background sync job for periodic node sync
+    private var backgroundTextJob: Job? = null
+
+    // Paste delay job
+    private var pasteDelayJob: Job? = null
+
     // Configuration  
     private const val MAX_POOL_SIZE = 8
     private const val COMBINE_SIZE = 3
     private const val EVENT_CLEANUP_MS = 2000L // Cleanup after 2s (reduced from 5s)
-    private const val NODE_SYNC_DELAY_MS = 500L // Sync with node after 500ms idle    // Enhanced Data class with finalText and timeSend
+    private const val NODE_SYNC_DELAY_MS = 1000L // Sync with node after 500ms idle
+    private const val PASTE_DELAY_MS = 1500L // Delay after paste before allowing next key events
+
+    // Paste delay tracking
+    private var lastPasteTime = 0L
+    private var isPasteDelayActive = false
+
+    // Enhanced Data class with finalText and timeSend
     data class TextEvent(
         val text: String,                    // Input text
         val action: String,                  // Action type
@@ -53,22 +69,85 @@ object keyboardHelper {
         val transform: (String) -> String?   // Transformation function
     )
 
-    fun setup(cb: () -> AccessibilityNodeInfo) {
+    fun setup(context: Context? = null, cb: () -> AccessibilityNodeInfo ) {
         getRootInActiveWindow = cb
+        applicationContext = context
+        if (context != null) {
+            clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            Log.d("EDU_SCREEN", "📋 Clipboard manager initialized: ${clipboardManager != null}")
+        }
         initializeCurrentText()
     }
-    
+
+    private fun isInPasteDelay(): Boolean {
+        if (!isPasteDelayActive) return false
+        
+        val currentTime = System.currentTimeMillis()
+        val timeSincePaste = currentTime - lastPasteTime
+        
+        if (timeSincePaste >= PASTE_DELAY_MS) {
+            isPasteDelayActive = false
+            Log.d("EDU_SCREEN", "⏰ Paste delay period ended (${timeSincePaste}ms elapsed)")
+            return false
+        }
+        
+        val remainingDelay = PASTE_DELAY_MS - timeSincePaste
+        Log.d("EDU_SCREEN", "⏳ Still in paste delay period: ${remainingDelay}ms remaining")
+        return true
+    }
+
+    private fun startPasteDelayTimer() {
+        // Cancel existing paste delay job
+        pasteDelayJob?.cancel()
+        
+        // Start new paste delay job
+        pasteDelayJob = processingScope.launch {
+            delay(PASTE_DELAY_MS)
+            isPasteDelayActive = false
+            Log.d("EDU_SCREEN", "⏰ Paste delay timer completed - ready for new key events")
+        }
+    }
+
+    /**
+     * Force reset paste delay - useful for debugging or emergency situations
+     */
+    fun resetPasteDelay() {
+        isPasteDelayActive = false
+        pasteDelayJob?.cancel()
+        Log.d("EDU_SCREEN", "🔄 Paste delay manually reset")
+    }
+
     private fun startBackgroundSync() {
         // Cancel existing background sync job
         backgroundSyncJob?.cancel()
-        
+
         // Start new single-time delay sync job
         backgroundSyncJob = processingScope.launch {
             delay(NODE_SYNC_DELAY_MS) // Wait for 500ms delay
             syncWithNodeText()
         }
     }
-    
+
+    private fun startBackgroundTextJob(){
+        if (backgroundTextJob != null) return // Already running
+        backgroundTextJob = processingScope.launch {
+            while (isActive){
+                delay(200)
+                val newNodeText = getNodeText()
+                if(newNodeText != null && newNodeText != currentText){
+                    Log.e("EDU_SCREEN", "🔄 Background text job difference current text: '$currentText', newNodeText: '$newNodeText'")
+                }else{
+                    Log.e("EDU_SCREEN", "🔄 Background text job found no change: '$currentText'")
+                }
+            }
+        }
+    }
+
+    private fun cancelBackgroundTextJob(){
+        backgroundTextJob?.cancel()
+        backgroundTextJob = null
+    }
+
     private fun initializeCurrentText() {
         processingScope.launch {
             try {
@@ -85,50 +164,56 @@ object keyboardHelper {
             }
         }
     }
-
-    private val vowelSets = listOf(
-        VowelSet(
-            base = 'a',
-            lowercaseForms = listOf("aáàảãạ", "âấầẩẫậ", "ăắằẳẵặ"),
-            uppercaseForms = listOf("AÁÀẢÃẠ", "ÂẤẦẨẪẬ", "ĂẮẰẲẴẶ")
-        ),
-        VowelSet(
-            base = 'e',
-            lowercaseForms = listOf("eéèẻẽẹ", "êếềểễệ"),
-            uppercaseForms = listOf("EÉÈẺẼẸ", "ÊẾỀỂỄỆ")
-        ),
-        VowelSet(
-            base = 'i',
-            lowercaseForms = listOf("iíìỉĩị"),
-            uppercaseForms = listOf("IÍÌỈĨỊ")
-        ),
-        VowelSet(
-            base = 'o',
-            lowercaseForms = listOf("oóòỏõọ", "ôốồổỗộ", "ơớờởỡợ"),
-            uppercaseForms = listOf("OÓÒỎÕỌ", "ÔỐỒỔỖỘ", "ƠỚỜỞỠỢ")
-        ),
-        VowelSet(
-            base = 'u',
-            lowercaseForms = listOf("uúùủũụ", "ưứừửữự"),
-            uppercaseForms = listOf("UÚÙỦŨỤ", "ƯỨỪỬỮỰ")
-        ),
-        VowelSet(
-            base = 'y',
-            lowercaseForms = listOf("yýỳỷỹỵ"),
-            uppercaseForms = listOf("YÝỲỶỸỴ")
-        )
-    )
-
-
     fun handleKeyboardCommand(command: RemoteControlCommand) {
         Log.w("handleKeyboardCommand", "command = ${command.dataKey()}")
         val action = command.action?.uppercase()
+        
+        // Check if we're in paste delay period (except for PASTE action itself)
+        if (action != "PASTE" && isInPasteDelay()) {
+            Log.w("EDU_SCREEN", "🚫 Ignoring $action command - still in paste delay period")
+            return
+        }
+        
         when (action) {
             "INSERT_TEXT" -> handleInsertText(command)
             "SET_TEXT" -> setTextOnFocusedNode(command.text ?: "")
             "BACKSPACE" -> removeCharactersFromFocusedNode(1)
-            "ENTER" -> appendSpecialText("\n")
-            "TAB" -> appendSpecialText("\t")
+            "ENTER" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling ENTER key - appending newline")
+                appendSpecialText("\n")
+            }
+            "TAB" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling TAB key - appending tab")
+                appendSpecialText("\t")
+            }
+            "DELETE" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling DELETE key - removing 1 character forward")
+                // DELETE key removes character after cursor, but for text input fields
+                // we'll treat it the same as BACKSPACE for simplicity
+                removeCharactersFromFocusedNode(1)
+            }
+            "COPY" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling COPY - copying selected text to clipboard")
+                handleCopyText()
+            }
+            "PASTE" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling PASTE - pasting text from clipboard")
+                handlePasteText(command.text)
+            }
+            "CUT" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling CUT - cutting selected text to clipboard")
+                handleCutText()
+            }
+            "SELECT_ALL" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling SELECT_ALL - selecting all text")
+                handleSelectAllText()
+            }
+            "ARROW_UP", "ARROW_DOWN", "ARROW_LEFT", "ARROW_RIGHT" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling arrow key: $action - not supported in text mode")
+                // Arrow keys are typically handled by the system, not by text insertion
+                // In text editing context, we might want to move cursor but that's complex
+                // For now, we log and ignore
+            }
             else -> Log.w("EDU_SCREEN", "⚠️ Unknown keyboard action: $action")
         }
     }
@@ -145,13 +230,28 @@ object keyboardHelper {
         }
 
         enqueueTextEvent(payload, "INSERT_TEXT") { existing ->
-            applyTelexInput(existing, payload)
+            TextHelper.applyTelexInput(existing, payload)
         }
     }
 
     private fun appendSpecialText(text: String) {
-        if (text.isEmpty()) return
-        enqueueTextEvent(text, "APPEND") { existing -> existing + text }
+        if (text.isEmpty()) {
+            Log.w("EDU_SCREEN", "⚠️ appendSpecialText called with empty text")
+            return
+        }
+        
+        val displayText = when (text) {
+            "\n" -> "\\n (newline)"
+            "\t" -> "\\t (tab)"
+            else -> "\"$text\""
+        }
+        Log.d("EDU_SCREEN", "📝 Appending special text: $displayText")
+        
+        enqueueTextEvent(text, "APPEND") { existing -> 
+            val result = existing + text
+            Log.d("EDU_SCREEN", "📝 Text after append: length=${result.length}, ends with newline: ${result.endsWith("\n")}")
+            result
+        }
     }
 
     private fun setTextOnFocusedNode(text: String) {
@@ -171,6 +271,185 @@ object keyboardHelper {
         }
     }
 
+    private fun handleCopyText() {
+        try {
+            val node = getEditableNode()
+            if (node == null) {
+                Log.w("EDU_SCREEN", "⚠️ No editable node focused; cannot copy text")
+                return
+            }
+
+            val selectedText = getSelectedText(node)
+            if (selectedText.isNullOrEmpty()) {
+                Log.w("EDU_SCREEN", "⚠️ No text selected for copy operation")
+                node.recycle()
+                return
+            }
+
+            copyToClipboard(selectedText, "Copied Text")
+            Log.d("EDU_SCREEN", "📋 Copied text to clipboard: '${selectedText.take(50)}${if (selectedText.length > 50) "..." else ""}'")
+            node.recycle()
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error copying text: ${e.message}")
+        }
+    }
+
+    private fun handlePasteText(pasteText: String?) {
+        try {
+            val textToPaste = pasteText ?: getClipboardText()
+            if (textToPaste.isNullOrEmpty()) {
+                Log.w("EDU_SCREEN", "⚠️ No text available to paste")
+                return
+            }
+
+            Log.d("EDU_SCREEN", "📋 Pasting text: '${textToPaste.take(50)}${if (textToPaste.length > 50) "..." else ""}' (${textToPaste.length} chars)")
+            
+            // Start paste delay period
+            lastPasteTime = System.currentTimeMillis()
+            isPasteDelayActive = true
+            startPasteDelayTimer()
+            Log.d("EDU_SCREEN", "⏰ Started paste delay period: ${PASTE_DELAY_MS}ms")
+            
+            // Use INSERT_TEXT to handle paste, which will apply Telex if needed
+            enqueueTextEvent(textToPaste, "PASTE") { existing ->
+                // For paste, we typically want to insert at cursor position
+                // Since we don't have cursor position, we append for now
+                // In a more advanced implementation, we'd replace selected text or insert at cursor
+                existing + textToPaste
+            }
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error pasting text: ${e.message}")
+            // Reset paste delay on error
+            isPasteDelayActive = false
+            pasteDelayJob?.cancel()
+        }
+    }
+
+    private fun handleCutText() {
+        try {
+            val node = getEditableNode()
+            if (node == null) {
+                Log.w("EDU_SCREEN", "⚠️ No editable node focused; cannot cut text")
+                return
+            }
+
+            val selectedText = getSelectedText(node)
+            if (selectedText.isNullOrEmpty()) {
+                Log.w("EDU_SCREEN", "⚠️ No text selected for cut operation")
+                node.recycle()
+                return
+            }
+
+            // Copy to clipboard first
+            copyToClipboard(selectedText, "Cut Text")
+            
+            // Then delete the selected text
+            // This is a simplified implementation - in reality we'd need to handle selection properly
+            val fullText = node.text?.toString() ?: ""
+            val newText = fullText.replace(selectedText, "")
+            
+            enqueueTextEvent(newText, "CUT") { _ -> newText }
+            
+            Log.d("EDU_SCREEN", "✂️ Cut text to clipboard: '${selectedText.take(50)}${if (selectedText.length > 50) "..." else ""}'")
+            node.recycle()
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error cutting text: ${e.message}")
+        }
+    }
+
+    private fun handleSelectAllText() {
+        try {
+            val node = getEditableNode()
+            if (node == null) {
+                Log.w("EDU_SCREEN", "⚠️ No editable node focused; cannot select all text")
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                val fullText = node.text?.toString() ?: ""
+                if (fullText.isNotEmpty()) {
+                    val args = Bundle().apply {
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, fullText.length)
+                    }
+                    val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+                    Log.d("EDU_SCREEN", "📝 Select all text: ${if (success) "success" else "failed"} (${fullText.length} chars)")
+                } else {
+                    Log.w("EDU_SCREEN", "⚠️ No text to select")
+                }
+            } else {
+                Log.w("EDU_SCREEN", "⚠️ Select all requires API 18+")
+            }
+            
+            node.recycle()
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error selecting all text: ${e.message}")
+        }
+    }
+
+    private fun getSelectedText(node: AccessibilityNodeInfo): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                val selectionStart = node.textSelectionStart
+                val selectionEnd = node.textSelectionEnd
+                val fullText = node.text?.toString()
+                
+                if (fullText != null && selectionStart >= 0 && selectionEnd > selectionStart && 
+                    selectionStart < fullText.length && selectionEnd <= fullText.length) {
+                    fullText.substring(selectionStart, selectionEnd)
+                } else {
+                    // If no selection, return the full text as fallback
+                    fullText
+                }
+            } else {
+                // For older API versions, return full text
+                node.text?.toString()
+            }
+        } catch (e: Exception) {
+            Log.w("EDU_SCREEN", "⚠️ Error getting selected text: ${e.message}")
+            null
+        }
+    }
+
+    private fun copyToClipboard(text: String, label: String = "Copied Text") {
+        try {
+            val clipboard = clipboardManager
+            if (clipboard != null) {
+                val clip = ClipData.newPlainText(label, text)
+                clipboard.setPrimaryClip(clip)
+                Log.d("EDU_SCREEN", "📋 Text copied to clipboard successfully")
+            } else {
+                Log.w("EDU_SCREEN", "⚠️ Clipboard manager not available")
+            }
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error copying to clipboard: ${e.message}")
+        }
+    }
+
+    private fun getClipboardText(): String? {
+        return try {
+            val clipboard = clipboardManager
+            if (clipboard != null && clipboard.hasPrimaryClip()) {
+                val clip = clipboard.primaryClip
+                if (clip != null && clip.itemCount > 0) {
+                    val item = clip.getItemAt(0)
+                    val text = item.text?.toString()
+                    Log.d("EDU_SCREEN", "📋 Retrieved text from clipboard: ${text?.length ?: 0} chars")
+                    text
+                } else {
+                    Log.w("EDU_SCREEN", "⚠️ No clipboard content available")
+                    null
+                }
+            } else {
+                Log.w("EDU_SCREEN", "⚠️ Clipboard manager not available or no content")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error reading from clipboard: ${e.message}")
+            null
+        }
+    }
+
     private fun enqueueTextEvent(text: String, action: String, transform: (String) -> String?) {
         synchronized(queueLock) {
             val event = TextEvent(
@@ -185,7 +464,6 @@ object keyboardHelper {
                 "EDU_SCREEN",
                 "📥 Event queued: $action, text='$text', queue size: ${eventQueue.size}"
             )
-
             // Clean up old events
             cleanupOldEvents()
 
@@ -211,7 +489,6 @@ object keyboardHelper {
                 removedCount++
             }
         }
-
         if (removedCount > 0) {
             Log.d(
                 "EDU_SCREEN",
@@ -234,6 +511,8 @@ object keyboardHelper {
             if (unsentEvents.size <= 1) {
                 Log.d("EDU_SCREEN", "🔄 Single event detected, syncing with node text first")
                 syncWithNodeText()
+            } else {
+                Log.e("EDU_SCREEN", "➡️ Processing ${unsentEvents.size} queued events")
             }
 
             // Calculate final text based on current strategy
@@ -367,13 +646,13 @@ object keyboardHelper {
         }
     }
 
-    private fun getNodeText(): String? {
+    private fun getNodeText(nodeD: AccessibilityNodeInfo? = null): String? {
         return try {
-            val node = getEditableNode()
+            val node = nodeD?: getEditableNode()
             if (node != null) {
                 val hint = node.hintText?.toString()
                 val originalRaw = node.text?.toString()
-                val result = sanitizeOriginalText(originalRaw, hint)
+                val result = TextHelper.sanitizeOriginalText(originalRaw, hint)
                 node.recycle()
                 result
             } else {
@@ -482,7 +761,13 @@ object keyboardHelper {
             when {
                 event.action.startsWith("INSERT_TEXT") -> {
                     // For insertions, move cursor to end of inserted text
-                    newPosition = newText.length
+                    val insertedText = event.text
+                    if (insertedText.isNotEmpty()) {
+                        // Move cursor to after the inserted text
+                        newPosition = currentSelection + insertedText.codePointCount(0, insertedText.length)
+                    } else {
+                        newPosition = newText.length
+                    }
                 }
 
                 event.action.startsWith("BACKSPACE") -> {
@@ -497,8 +782,29 @@ object keyboardHelper {
                 }
 
                 event.action == "APPEND" -> {
-                    // For append, move to end
-                    newPosition = newText.length
+                    // For append (like ENTER, TAB), calculate position based on appended text
+                    val appendedText = event.text
+                    if (appendedText.isNotEmpty()) {
+                        // Move cursor to after the appended text
+                        newPosition = currentSelection + appendedText.codePointCount(0, appendedText.length)
+                    } else {
+                        newPosition = newText.length
+                    }
+                }
+
+                event.action == "PASTE" -> {
+                    // For paste, move cursor to end of pasted text
+                    val pastedText = event.text
+                    if (pastedText.isNotEmpty()) {
+                        newPosition = currentSelection + pastedText.codePointCount(0, pastedText.length)
+                    } else {
+                        newPosition = newText.length
+                    }
+                }
+
+                event.action == "CUT" -> {
+                    // For cut, the new text should be shorter, so position might need adjustment
+                    newPosition = newText.length.coerceAtMost(currentSelection)
                 }
             }
         }
@@ -545,228 +851,17 @@ object keyboardHelper {
     }
 
 
-    ////
-    private fun findToneTarget(text: String): Int {
-        ensureVowelTables()
-        
-        // Find the last space to get the current word boundary
-        val lastSpaceIndex = text.lastIndexOf(' ')
-        val startIndex = if (lastSpaceIndex == -1) 0 else lastSpaceIndex + 1
-        
-        // Only search in the current word (after the last space)
-        for (index in text.length - 1 downTo startIndex) {
-            if (vowelDecodeMap.containsKey(text[index])) {
-                return index
-            }
-        }
-        return -1
-    }
 
-    private fun encodeVowel(base: Char, type: Int, tone: Int, uppercase: Boolean): Char? {
-        ensureVowelTables()
-        return vowelEncodeMap[VowelKey(base, type, tone, uppercase)]
-    }
 
-    private fun replaceChar(text: String, index: Int, replacement: Char): String {
-        if (index < 0 || index >= text.length) return text
-        val builder = StringBuilder(text)
-        builder.setCharAt(index, replacement)
-        return builder.toString()
-    }
-
-    private fun ensureVowelTables() {
-        if (vowelDecodeMap.isNotEmpty()) return
-
-        vowelSets.forEach { set ->
-            set.lowercaseForms.forEachIndexed { type, tones ->
-                tones.forEachIndexed { tone, ch ->
-                    vowelDecodeMap[ch] = VowelInfo(set.base, type, tone, false)
-                    vowelEncodeMap[VowelKey(set.base, type, tone, false)] = ch
-                }
-            }
-            set.uppercaseForms.forEachIndexed { type, tones ->
-                tones.forEachIndexed { tone, ch ->
-                    vowelDecodeMap[ch] = VowelInfo(set.base, type, tone, true)
-                    vowelEncodeMap[VowelKey(set.base, type, tone, true)] = ch
-                }
-            }
-        }
-    }
-
-    private fun sanitizeOriginalText(original: String?, hint: String?): String {
-        val value = original ?: ""
-        if (value.isEmpty()) return ""
-        val hintValue = hint ?: return value
-        return if (value == hintValue) "" else value
-    }
-
-    private fun applyTelexInput(existing: String, input: String): String {
-        ensureVowelTables()
-        if (input.isEmpty()) return existing
-        if (input.length > 1) {
-            // Treat multi-character payloads (e.g., paste) as literal text
-            return existing + input
-        }
-        var result = existing
-        input.forEach { ch ->
-            result = applyTelexChar(result, ch)
-        }
-        return result
-    }
-
-    private fun applyTelexChar(existing: String, char: Char): String {
-        ensureVowelTables()
-        val lower = char.lowercaseChar()
-        val tone = toneKeyMap[lower]
-        if (tone != null) {
-            val index = findToneTarget(existing)
-            if (index != -1) {
-                val info = vowelDecodeMap[existing[index]]
-                if (info != null) {
-                    val replacement = encodeVowel(
-                        info.base,
-                        info.type,
-                        tone,
-                        info.uppercase
-                    )
-                    if (replacement != null) {
-                        return replaceChar(
-                            existing,
-                            index,
-                            replacement
-                        )
-                    }
-                }
-            }
-            return existing + char
-        }
-
-        if (lower == 'z') {
-            val index = findToneTarget(existing)
-            if (index != -1) {
-                val info = vowelDecodeMap[existing[index]]
-                if (info != null && info.tone != 0) {
-                    val replacement = encodeVowel(
-                        info.base,
-                        info.type,
-                        0,
-                        info.uppercase
-                    )
-                    if (replacement != null) {
-                        return replaceChar(
-                            existing,
-                            index,
-                            replacement
-                        )
-                    }
-                }
-            }
-            return existing
-        }
-
-        if (lower == 'd') {
-            val lastIndex = existing.lastIndex
-            if (lastIndex >= 0) {
-                val lastChar = existing[lastIndex]
-                if (lastChar == 'd' || lastChar == 'D') {
-                    val replacement = if (lastChar.isUpperCase()) 'Đ' else 'đ'
-                    return replaceChar(
-                        existing,
-                        lastIndex,
-                        replacement
-                    )
-                }
-            }
-            return existing + char
-        }
-
-        if (lower == 'w') {
-            val index = findToneTarget(existing)
-            if (index != -1) {
-                val info = vowelDecodeMap[existing[index]]
-                if (info != null) {
-                    val newType = when (info.base) {
-                        'a' -> 2
-                        'o' -> 2
-                        'u' -> 1
-                        else -> info.type
-                    }
-                    if (newType != info.type) {
-                        val replacement = encodeVowel(
-                            info.base,
-                            newType,
-                            info.tone,
-                            info.uppercase
-                        )
-                        if (replacement != null) {
-                            return replaceChar(
-                                existing,
-                                index,
-                                replacement
-                            )
-                        }
-                    }
-                }
-            }
-            return existing + char
-        }
-
-        if (lower == 'a' || lower == 'e' || lower == 'o') {
-            val lastIndex = existing.lastIndex
-            if (lastIndex >= 0) {
-                val info = vowelDecodeMap[existing[lastIndex]]
-                if (info != null && info.base == lower && info.type == 0) {
-                    val targetType = when (lower) {
-                        'a' -> 1
-                        'e' -> 1
-                        'o' -> 1
-                        else -> info.type
-                    }
-                    if (targetType != info.type) {
-                        val replacement = encodeVowel(
-                            info.base,
-                            targetType,
-                            info.tone,
-                            info.uppercase
-                        )
-                        if (replacement != null) {
-                            return replaceChar(
-                                existing,
-                                lastIndex,
-                                replacement
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        return existing + char
-    }
-    
     fun cleanup() {
         backgroundSyncJob?.cancel()
+        backgroundTextJob?.cancel()
+        pasteDelayJob?.cancel()
         processingScope.cancel()
+        clipboardManager = null
+        applicationContext = null
+        isPasteDelayActive = false
+        lastPasteTime = 0L
         Log.d("EDU_SCREEN", "🧹 KeyboardHelper cleanup completed")
     }
 }
-
-data class VowelInfo(
-    val base: Char,
-    val type: Int,
-    val tone: Int,
-    val uppercase: Boolean
-)
-
-data class VowelKey(
-    val base: Char,
-    val type: Int,
-    val tone: Int,
-    val uppercase: Boolean
-)
-
-data class VowelSet(
-    val base: Char,
-    val lowercaseForms: List<String>,
-    val uppercaseForms: List<String>
-)

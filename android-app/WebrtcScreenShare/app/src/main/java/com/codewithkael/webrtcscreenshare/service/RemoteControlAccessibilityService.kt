@@ -52,14 +52,14 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         serviceInstance = this
-        
+
         // Initialize gesture handlers
         dispatcher = GestureDispatcher(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             pointerManager = PointerManager(dispatcher)
         }
         simpleGestureHandler = SimpleGestureHandler(this)
-        keyboardHelper.setup {
+        keyboardHelper.setup(this){
             getRootInActiveWindow()
         }
         Log.d(TAG, "✅ AccessibilityService connected")
@@ -145,7 +145,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     private fun handleTapCommand(command: RemoteControlCommand, metrics: DisplayMetrics) {
         val x = resolveCoordinate(command.x, command.normalizedX, metrics.widthPixels)
         val y = resolveCoordinate(command.y, command.normalizedY, metrics.heightPixels)
-        
+
         Log.d(TAG, "👆 TAP at (${x.toInt()}, ${y.toInt()})")
         simpleGestureHandler.tap(x, y, command.durationMs)
     }
@@ -192,8 +192,8 @@ class RemoteControlAccessibilityService : AccessibilityService() {
      * Resolve coordinate from raw or normalized value
      */
     private fun resolveCoordinate(raw: Float, normalized: Float?, max: Int): Float {
-        normalized?.let { 
-            return (it * max).coerceIn(0f, max.toFloat()) 
+        normalized?.let {
+            return (it * max).coerceIn(0f, max.toFloat())
         }
         return raw.coerceIn(0f, max.toFloat())
     }

@@ -24,7 +24,7 @@ interface PointerState {
 
 type KeyboardCommand = {
   type: 'KEYBOARD'
-  action: 'INSERT_TEXT' | 'BACKSPACE' | 'ENTER' | 'TAB' | 'DELETE' | 'ARROW_UP' | 'ARROW_DOWN' | 'ARROW_LEFT' | 'ARROW_RIGHT' | string
+  action: 'INSERT_TEXT' | 'BACKSPACE' | 'ENTER' | 'TAB' | 'DELETE' | 'ARROW_UP' | 'ARROW_DOWN' | 'ARROW_LEFT' | 'ARROW_RIGHT' | 'COPY' | 'PASTE' | 'CUT' | 'SELECT_ALL' | string
   text?: string
   key?: string
   code?: string
@@ -278,9 +278,10 @@ function App() {
     }
 
     event.preventDefault()
+    console.log('[WEB][Paste] Pasting text:', text.length, 'characters')
     dispatchKeyboardCommand({
       type: 'KEYBOARD',
-      action: 'INSERT_TEXT',
+      action: 'PASTE',
       text,
       key: 'Paste',
       code: 'Paste'
@@ -316,10 +317,48 @@ function App() {
       ...modifiers
     }
 
+    // Handle keyboard shortcuts with Ctrl/Cmd
     if (event.ctrlKey || event.metaKey) {
-      if (event.key.toLowerCase() !== 'v') {
+      const keyLower = event.key.toLowerCase()
+      
+      if (keyLower === 'c') {
+        // Ctrl+C or Cmd+C for Copy
+        event.preventDefault()
+        dispatchKeyboardCommand({
+          ...baseCommand,
+          action: 'COPY'
+        })
         return
       }
+      
+      if (keyLower === 'v') {
+        // Ctrl+V or Cmd+V for Paste - will be handled by paste event listener
+        // Don't prevent default here, let the paste event handle it
+        return
+      }
+      
+      if (keyLower === 'x') {
+        // Ctrl+X or Cmd+X for Cut
+        event.preventDefault()
+        dispatchKeyboardCommand({
+          ...baseCommand,
+          action: 'CUT'
+        })
+        return
+      }
+      
+      if (keyLower === 'a') {
+        // Ctrl+A or Cmd+A for Select All
+        event.preventDefault()
+        dispatchKeyboardCommand({
+          ...baseCommand,
+          action: 'SELECT_ALL'
+        })
+        return
+      }
+      
+      // For other Ctrl/Cmd combinations, don't handle them
+      return
     }
 
     if (key === 'Backspace') {
@@ -1008,6 +1047,21 @@ function App() {
     event.preventDefault()
   }, [dispatchPointerCommand, physicalSize, baseSize])
 
+  const handleContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isStreamReady || !selectedDeviceId) {
+      return
+    }
+    
+    // Prevent browser context menu
+    event.preventDefault()
+    
+    // Show a simple context menu or handle right-click actions
+    console.log('[WEB][Context] Right-click detected at', event.clientX, event.clientY)
+    
+    // For now, we'll just log it. In a full implementation, you might show a context menu
+    // with Copy, Paste, Cut, Select All options
+  }, [isStreamReady, selectedDeviceId])
+
   const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
     if (!isStreamReady || !selectedDeviceId || !videoContainerRef.current || !baseSize) {
       return
@@ -1278,6 +1332,7 @@ function App() {
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
               onWheel={handleWheel}
+              onContextMenu={handleContextMenu}
             >
               {!isStreamReady && (
                 <div style={{ 
