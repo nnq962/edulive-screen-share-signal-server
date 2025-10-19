@@ -37,6 +37,7 @@ object keyboardHelper {
 
     // Coroutine scope for async processing
     private val processingScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var processingJob: Job? = null
 
     // Background sync job for periodic node sync
     private var backgroundSyncJob: Job? = null
@@ -52,10 +53,11 @@ object keyboardHelper {
     private const val COMBINE_SIZE = 3
     private const val EVENT_CLEANUP_MS = 2000L // Cleanup after 2s (reduced from 5s)
     private const val NODE_SYNC_DELAY_MS = 1000L // Sync with node after 500ms idle
-    private const val PASTE_DELAY_MS = 1500L // Delay after paste before allowing next key events
+    private const val PROCESS_SPECIAL_EVENT_DELAY_MS =
+        1200L // Delay after paste before allowing next key events
 
     // Paste delay tracking
-    private var lastPasteTime = 0L
+    private var lastTimeProcessSpecialEvent = 0L
     private var isPasteDelayActive = false
 
     // Enhanced Data class with finalText and timeSend
@@ -66,55 +68,30 @@ object keyboardHelper {
         var isSent: Boolean = false,         // Whether event has been sent
         var finalText: String = "",          // Final calculated text result
         var timeSend: Long = 0L,             // Time when event was sent
-        val transform: (String) -> String?   // Transformation function
+        val transform: (String) -> String?,  // Transformation function
+        val selectionStart: Int = -1,        // Original selection start position
+        val selectionEnd: Int = -1           // Original selection end position
     )
 
-    fun setup(context: Context? = null, cb: () -> AccessibilityNodeInfo ) {
+    fun setup(context: Context? = null, cb: () -> AccessibilityNodeInfo) {
         getRootInActiveWindow = cb
         applicationContext = context
         if (context != null) {
-            clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboardManager =
+                context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             Log.d("EDU_SCREEN", "📋 Clipboard manager initialized: ${clipboardManager != null}")
         }
         initializeCurrentText()
     }
 
-    private fun isInPasteDelay(): Boolean {
-        if (!isPasteDelayActive) return false
-        
+    private fun isInProcessSpecialEvent(): Boolean {
         val currentTime = System.currentTimeMillis()
-        val timeSincePaste = currentTime - lastPasteTime
-        
-        if (timeSincePaste >= PASTE_DELAY_MS) {
-            isPasteDelayActive = false
+        val timeSincePaste = currentTime - lastTimeProcessSpecialEvent
+        if (timeSincePaste >= PROCESS_SPECIAL_EVENT_DELAY_MS) {
             Log.d("EDU_SCREEN", "⏰ Paste delay period ended (${timeSincePaste}ms elapsed)")
             return false
         }
-        
-        val remainingDelay = PASTE_DELAY_MS - timeSincePaste
-        Log.d("EDU_SCREEN", "⏳ Still in paste delay period: ${remainingDelay}ms remaining")
         return true
-    }
-
-    private fun startPasteDelayTimer() {
-        // Cancel existing paste delay job
-        pasteDelayJob?.cancel()
-        
-        // Start new paste delay job
-        pasteDelayJob = processingScope.launch {
-            delay(PASTE_DELAY_MS)
-            isPasteDelayActive = false
-            Log.d("EDU_SCREEN", "⏰ Paste delay timer completed - ready for new key events")
-        }
-    }
-
-    /**
-     * Force reset paste delay - useful for debugging or emergency situations
-     */
-    fun resetPasteDelay() {
-        isPasteDelayActive = false
-        pasteDelayJob?.cancel()
-        Log.d("EDU_SCREEN", "🔄 Paste delay manually reset")
     }
 
     private fun startBackgroundSync() {
@@ -126,26 +103,6 @@ object keyboardHelper {
             delay(NODE_SYNC_DELAY_MS) // Wait for 500ms delay
             syncWithNodeText()
         }
-    }
-
-    private fun startBackgroundTextJob(){
-        if (backgroundTextJob != null) return // Already running
-        backgroundTextJob = processingScope.launch {
-            while (isActive){
-                delay(200)
-                val newNodeText = getNodeText()
-                if(newNodeText != null && newNodeText != currentText){
-                    Log.e("EDU_SCREEN", "🔄 Background text job difference current text: '$currentText', newNodeText: '$newNodeText'")
-                }else{
-                    Log.e("EDU_SCREEN", "🔄 Background text job found no change: '$currentText'")
-                }
-            }
-        }
-    }
-
-    private fun cancelBackgroundTextJob(){
-        backgroundTextJob?.cancel()
-        backgroundTextJob = null
     }
 
     private fun initializeCurrentText() {
@@ -164,55 +121,75 @@ object keyboardHelper {
             }
         }
     }
-    fun handleKeyboardCommand(command: RemoteControlCommand) {
-        Log.w("handleKeyboardCommand", "command = ${command.dataKey()}")
+
+    private fun handleSpecificTextCommand(command: RemoteControlCommand) {
+        Log.w("handleSpecificTextCommand", "command = ${command.dataKey()}")
         val action = command.action?.uppercase()
-        
-        // Check if we're in paste delay period (except for PASTE action itself)
-        if (action != "PASTE" && isInPasteDelay()) {
-            Log.w("EDU_SCREEN", "🚫 Ignoring $action command - still in paste delay period")
-            return
-        }
-        
+        lastTimeProcessSpecialEvent = System.currentTimeMillis()
+
         when (action) {
-            "INSERT_TEXT" -> handleInsertText(command)
-            "SET_TEXT" -> setTextOnFocusedNode(command.text ?: "")
-            "BACKSPACE" -> removeCharactersFromFocusedNode(1)
-            "ENTER" -> {
-                Log.d("EDU_SCREEN", "🎯 Handling ENTER key - appending newline")
-                appendSpecialText("\n")
-            }
-            "TAB" -> {
-                Log.d("EDU_SCREEN", "🎯 Handling TAB key - appending tab")
-                appendSpecialText("\t")
-            }
+            // Future specific text commands can be handled here
             "DELETE" -> {
                 Log.d("EDU_SCREEN", "🎯 Handling DELETE key - removing 1 character forward")
-                // DELETE key removes character after cursor, but for text input fields
-                // we'll treat it the same as BACKSPACE for simplicity
+                // DELETE removes character after cursor (forward delete)
+                removeCharacterForward(1)
+            }
+            "BACKSPACE" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling BACKSPACE key - removing 1 character backward")
                 removeCharactersFromFocusedNode(1)
             }
             "COPY" -> {
                 Log.d("EDU_SCREEN", "🎯 Handling COPY - copying selected text to clipboard")
                 handleCopyText()
             }
+
             "PASTE" -> {
                 Log.d("EDU_SCREEN", "🎯 Handling PASTE - pasting text from clipboard")
                 handlePasteText(command.text)
             }
+
             "CUT" -> {
                 Log.d("EDU_SCREEN", "🎯 Handling CUT - cutting selected text to clipboard")
                 handleCutText()
             }
+
             "SELECT_ALL" -> {
                 Log.d("EDU_SCREEN", "🎯 Handling SELECT_ALL - selecting all text")
                 handleSelectAllText()
             }
+        }
+    }
+
+    fun handleKeyboardCommand(command: RemoteControlCommand) {
+        Log.w("handleKeyboardCommand", "command = ${command.dataKey()}")
+        val action = command.action?.uppercase()
+
+        // Check if we're in paste delay period (except for PASTE action itself)
+        if (isInProcessSpecialEvent()) {
+            Log.w("EDU_SCREEN", "🚫 Ignoring $action command - still in paste delay period")
+            return
+        }
+        setupProcessEventJob()
+
+        when (action) {
+            "INSERT_TEXT" -> handleInsertText(command)
+            "SET_TEXT" -> setTextOnFocusedNode(command.text ?: "")
+            "ENTER" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling ENTER key - appending newline")
+                appendSpecialText("\n")
+            }
+
+            "TAB" -> {
+                Log.d("EDU_SCREEN", "🎯 Handling TAB key - appending tab")
+                appendSpecialText("\t")
+            }
+
+            "BACKSPACE", "DELETE", "COPY", "PASTE", "CUT", "SELECT_ALL" -> {
+                handleSpecificTextCommand(command)
+            }
+
             "ARROW_UP", "ARROW_DOWN", "ARROW_LEFT", "ARROW_RIGHT" -> {
                 Log.d("EDU_SCREEN", "🎯 Handling arrow key: $action - not supported in text mode")
-                // Arrow keys are typically handled by the system, not by text insertion
-                // In text editing context, we might want to move cursor but that's complex
-                // For now, we log and ignore
             }
             else -> Log.w("EDU_SCREEN", "⚠️ Unknown keyboard action: $action")
         }
@@ -239,17 +216,21 @@ object keyboardHelper {
             Log.w("EDU_SCREEN", "⚠️ appendSpecialText called with empty text")
             return
         }
-        
+
         val displayText = when (text) {
             "\n" -> "\\n (newline)"
             "\t" -> "\\t (tab)"
             else -> "\"$text\""
         }
         Log.d("EDU_SCREEN", "📝 Appending special text: $displayText")
-        
-        enqueueTextEvent(text, "APPEND") { existing -> 
+
+        enqueueTextEvent(text, "APPEND") { existing ->
             val result = existing + text
-            Log.d("EDU_SCREEN", "📝 Text after append: length=${result.length}, ends with newline: ${result.endsWith("\n")}")
+            Log.d(
+                "EDU_SCREEN", "📝 Text after append: length=${result.length}, ends with newline: ${
+                    result.endsWith("\n")
+                }"
+            )
             result
         }
     }
@@ -260,13 +241,106 @@ object keyboardHelper {
 
     private fun removeCharactersFromFocusedNode(count: Int) {
         if (count <= 0) return
+        // Check if there's a text selection first
+        val node = getEditableNode()
+        if (node != null) {
+            val selectedText = getSelectedText(node)
+            if (!selectedText.isNullOrEmpty() && hasTextSelection(node)) {
+                // Get selection positions
+                val selStart = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    node.textSelectionStart
+                } else -1
+                val selEnd = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    node.textSelectionEnd
+                } else -1
+
+                // If there's a selection, delete the entire selection
+                Log.d(
+                    "EDU_SCREEN",
+                    "⬅️ BACKSPACE: deleting selected text (${selectedText.length} chars): '${
+                        selectedText.take(20)
+                    }...'"
+                )
+                enqueueTextEventWithSelection(
+                    "", "BACKSPACE_SELECTION", selStart, selEnd
+                ) { existing ->
+                    deleteSelectedText(existing, node)
+                }
+                node.recycle()
+                return
+            }
+            node.recycle()
+        }
+
+        // Normal backspace behavior (no selection)
         enqueueTextEvent("", "BACKSPACE_$count") { existing ->
+            var result = existing
+            val originalLength = result.codePointCount(0, result.length)
+            val actualCount = count.coerceAtMost(originalLength)
+
+            repeat(actualCount) {
+                if (result.isEmpty()) return@repeat
+                val cutIndex = result.offsetByCodePoints(result.length, -1)
+                result = result.substring(0, cutIndex)
+            }
+
+            Log.d(
+                "EDU_SCREEN",
+                "⬅️ BACKSPACE: removed $actualCount character(s), length: $originalLength → ${result.length}"
+            )
+            result
+        }
+    }
+
+    private fun removeCharacterForward(count: Int) {
+        if (count <= 0) return
+
+        // Check if there's a text selection first
+        val node = getEditableNode()
+        if (node != null) {
+            val selectedText = getSelectedText(node)
+            if (!selectedText.isNullOrEmpty() && hasTextSelection(node)) {
+                // Get selection positions
+                val selStart = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    node.textSelectionStart
+                } else -1
+                val selEnd = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    node.textSelectionEnd
+                } else -1
+
+                // If there's a selection, delete the entire selection (same as backspace with selection)
+                Log.d(
+                    "EDU_SCREEN",
+                    "🗑️ DELETE: deleting selected text (${selectedText.length} chars): '${
+                        selectedText.take(20)
+                    }...'"
+                )
+                enqueueTextEventWithSelection(
+                    "", "DELETE_SELECTION", selStart, selEnd
+                ) { existing ->
+                    deleteSelectedText(existing, node)
+                }
+                node.recycle()
+                return
+            }
+            node.recycle()
+        }
+
+        // Normal delete behavior (no selection)
+        enqueueTextEvent("", "DELETE_$count") { existing ->
+            // For DELETE (forward delete), we need cursor position
+            // Since we don't track cursor position in this implementation,
+            // we'll simulate by removing from the end like backspace
+            // In a real implementation, this would remove characters after cursor
             var result = existing
             repeat(count.coerceAtMost(result.codePointCount(0, result.length))) {
                 if (result.isEmpty()) return@repeat
                 val cutIndex = result.offsetByCodePoints(result.length, -1)
                 result = result.substring(0, cutIndex)
             }
+            Log.d(
+                "EDU_SCREEN", "🗑️ DELETE: removed $count character(s), new length: ${result.length}"
+            )
             result
         }
     }
@@ -287,7 +361,10 @@ object keyboardHelper {
             }
 
             copyToClipboard(selectedText, "Copied Text")
-            Log.d("EDU_SCREEN", "📋 Copied text to clipboard: '${selectedText.take(50)}${if (selectedText.length > 50) "..." else ""}'")
+            Log.d(
+                "EDU_SCREEN",
+                "📋 Copied text to clipboard: '${selectedText.take(50)}${if (selectedText.length > 50) "..." else ""}'"
+            )
             node.recycle()
         } catch (e: Exception) {
             Log.e("EDU_SCREEN", "❌ Error copying text: ${e.message}")
@@ -302,14 +379,13 @@ object keyboardHelper {
                 return
             }
 
-            Log.d("EDU_SCREEN", "📋 Pasting text: '${textToPaste.take(50)}${if (textToPaste.length > 50) "..." else ""}' (${textToPaste.length} chars)")
-            
-            // Start paste delay period
-            lastPasteTime = System.currentTimeMillis()
-            isPasteDelayActive = true
-            startPasteDelayTimer()
-            Log.d("EDU_SCREEN", "⏰ Started paste delay period: ${PASTE_DELAY_MS}ms")
-            
+            Log.d(
+                "EDU_SCREEN",
+                "📋 Pasting text: '${textToPaste.take(50)}${if (textToPaste.length > 50) "..." else ""}' (${textToPaste.length} chars)"
+            )
+
+            Log.d("EDU_SCREEN", "⏰ Started paste delay period: ${PROCESS_SPECIAL_EVENT_DELAY_MS}ms")
+
             // Use INSERT_TEXT to handle paste, which will apply Telex if needed
             enqueueTextEvent(textToPaste, "PASTE") { existing ->
                 // For paste, we typically want to insert at cursor position
@@ -319,9 +395,7 @@ object keyboardHelper {
             }
         } catch (e: Exception) {
             Log.e("EDU_SCREEN", "❌ Error pasting text: ${e.message}")
-            // Reset paste delay on error
-            isPasteDelayActive = false
-            pasteDelayJob?.cancel()
+
         }
     }
 
@@ -342,15 +416,18 @@ object keyboardHelper {
 
             // Copy to clipboard first
             copyToClipboard(selectedText, "Cut Text")
-            
+
             // Then delete the selected text
             // This is a simplified implementation - in reality we'd need to handle selection properly
             val fullText = node.text?.toString() ?: ""
             val newText = fullText.replace(selectedText, "")
-            
+
             enqueueTextEvent(newText, "CUT") { _ -> newText }
-            
-            Log.d("EDU_SCREEN", "✂️ Cut text to clipboard: '${selectedText.take(50)}${if (selectedText.length > 50) "..." else ""}'")
+
+            Log.d(
+                "EDU_SCREEN",
+                "✂️ Cut text to clipboard: '${selectedText.take(50)}${if (selectedText.length > 50) "..." else ""}'"
+            )
             node.recycle()
         } catch (e: Exception) {
             Log.e("EDU_SCREEN", "❌ Error cutting text: ${e.message}")
@@ -370,17 +447,23 @@ object keyboardHelper {
                 if (fullText.isNotEmpty()) {
                     val args = Bundle().apply {
                         putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
-                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, fullText.length)
+                        putInt(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, fullText.length
+                        )
                     }
-                    val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
-                    Log.d("EDU_SCREEN", "📝 Select all text: ${if (success) "success" else "failed"} (${fullText.length} chars)")
+                    val success =
+                        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+                    Log.d(
+                        "EDU_SCREEN",
+                        "📝 Select all text: ${if (success) "success" else "failed"} (${fullText.length} chars)"
+                    )
                 } else {
                     Log.w("EDU_SCREEN", "⚠️ No text to select")
                 }
             } else {
                 Log.w("EDU_SCREEN", "⚠️ Select all requires API 18+")
             }
-            
+
             node.recycle()
         } catch (e: Exception) {
             Log.e("EDU_SCREEN", "❌ Error selecting all text: ${e.message}")
@@ -393,9 +476,8 @@ object keyboardHelper {
                 val selectionStart = node.textSelectionStart
                 val selectionEnd = node.textSelectionEnd
                 val fullText = node.text?.toString()
-                
-                if (fullText != null && selectionStart >= 0 && selectionEnd > selectionStart && 
-                    selectionStart < fullText.length && selectionEnd <= fullText.length) {
+
+                if (fullText != null && selectionStart >= 0 && selectionEnd > selectionStart && selectionStart < fullText.length && selectionEnd <= fullText.length) {
                     fullText.substring(selectionStart, selectionEnd)
                 } else {
                     // If no selection, return the full text as fallback
@@ -408,6 +490,60 @@ object keyboardHelper {
         } catch (e: Exception) {
             Log.w("EDU_SCREEN", "⚠️ Error getting selected text: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Check if there's actually a text selection (not just cursor position)
+     */
+    private fun hasTextSelection(node: AccessibilityNodeInfo): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                val selectionStart = node.textSelectionStart
+                val selectionEnd = node.textSelectionEnd
+                val fullText = node.text?.toString()
+
+                // True selection means start != end and both are valid positions
+                fullText != null && selectionStart >= 0 && selectionEnd > selectionStart && selectionStart < fullText.length && selectionEnd <= fullText.length
+            } else {
+                false // Can't detect selection on older APIs
+            }
+        } catch (e: Exception) {
+            Log.w("EDU_SCREEN", "⚠️ Error checking text selection: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Delete the currently selected text from the existing text
+     */
+    private fun deleteSelectedText(existing: String, node: AccessibilityNodeInfo): String {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                val selectionStart = node.textSelectionStart
+                val selectionEnd = node.textSelectionEnd
+
+                if (selectionStart >= 0 && selectionEnd > selectionStart && selectionStart < existing.length && selectionEnd <= existing.length) {
+
+                    // Remove the selected portion
+                    val beforeSelection = existing.substring(0, selectionStart)
+                    val afterSelection = existing.substring(selectionEnd)
+                    val result = beforeSelection + afterSelection
+
+                    Log.d(
+                        "EDU_SCREEN",
+                        "✂️ Deleted selection: pos $selectionStart-$selectionEnd, new length: ${result.length}"
+                    )
+                    return result
+                }
+            }
+
+            // Fallback: return existing text unchanged
+            Log.w("EDU_SCREEN", "⚠️ Could not delete selection, returning unchanged text")
+            existing
+        } catch (e: Exception) {
+            Log.e("EDU_SCREEN", "❌ Error deleting selected text: ${e.message}")
+            existing
         }
     }
 
@@ -434,7 +570,9 @@ object keyboardHelper {
                 if (clip != null && clip.itemCount > 0) {
                     val item = clip.getItemAt(0)
                     val text = item.text?.toString()
-                    Log.d("EDU_SCREEN", "📋 Retrieved text from clipboard: ${text?.length ?: 0} chars")
+                    Log.d(
+                        "EDU_SCREEN", "📋 Retrieved text from clipboard: ${text?.length ?: 0} chars"
+                    )
                     text
                 } else {
                     Log.w("EDU_SCREEN", "⚠️ No clipboard content available")
@@ -466,13 +604,106 @@ object keyboardHelper {
             )
             // Clean up old events
             cleanupOldEvents()
+        }
+    }
 
-            // Start processing if not already running (using coroutines)
-            if (!isProcessing) {
-                processingScope.launch {
-                    processEventQueue()
+    private fun setupProcessEventJob() {
+        // Cancel existing processing job if any
+        // Start processing if not already running (using coroutines)
+        if (processingJob?.isActive == true) {
+            return
+        }
+        processingJob = processingScope.launch {
+            while (isActive) {
+                // Check if queue is empty and skip processing if so
+                val unsentEvents = synchronized(queueLock) {
+                    eventQueue.filter { !it.isSent }
+                }
+
+                if (unsentEvents.isEmpty()) {
+                    delay(50) // Wait a bit before checking again
+                } else {
+                    try {
+                        // Special case: If only 1 event, sync with node first
+                        if (unsentEvents.size <= 1) {
+                            Log.d(
+                                "EDU_SCREEN",
+                                "🔄 Single event detected, syncing with node text first"
+                            )
+                            syncWithNodeText()
+                        } else {
+                            Log.e("EDU_SCREEN", "➡️ Processing ${unsentEvents.size} queued events")
+                        }
+                        // Calculate final text based on current strategy
+                        val finalText = calculateFinalText(unsentEvents)
+
+                        // Execute the text update on main thread
+                        withContext(Dispatchers.Main) {
+                            executeTextUpdate(finalText, unsentEvents)
+                            // Schedule background sync after processing is complete
+                            startBackgroundSync()
+                        }
+                        // Mark events as sent and update timestamps
+                        val sendTime = System.currentTimeMillis()
+                        synchronized(queueLock) {
+                            unsentEvents.forEach { event ->
+                                event.isSent = true
+                                event.finalText = finalText
+                                event.timeSend = sendTime
+                            }
+                            lastSentEventTime = sendTime
+                        }
+
+                        Log.d(
+                            "EDU_SCREEN",
+                            "✅ Processed ${unsentEvents.size} events, final text length: ${finalText.length}"
+                        )
+
+                        // Continue processing if there are more events
+                        val hasMoreEvents = synchronized(queueLock) {
+                            eventQueue.any { !it.isSent }
+                        }
+
+                        if (hasMoreEvents) {
+                            // Schedule next batch processing with small delay
+                            delay(10) // Small delay to prevent overwhelming
+                        } else {
+                            delay(50) // No more events, wait a bit
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e("EDU_SCREEN", "❌ Error processing event queue: ${e.message}", e)
+                        delay(100) // Wait longer on error
+                    }
                 }
             }
+        }
+    }
+
+    private fun enqueueTextEventWithSelection(
+        text: String,
+        action: String,
+        selectionStart: Int,
+        selectionEnd: Int,
+        transform: (String) -> String?
+    ) {
+        synchronized(queueLock) {
+            val event = TextEvent(
+                text = text,
+                action = action,
+                timestamp = System.currentTimeMillis(),
+                transform = transform,
+                selectionStart = selectionStart,
+                selectionEnd = selectionEnd
+            )
+
+            eventQueue.add(event)
+            Log.d(
+                "EDU_SCREEN",
+                "📥 Selection event queued: $action, selection: $selectionStart-$selectionEnd, queue size: ${eventQueue.size}"
+            )
+            // Clean up old events
+            cleanupOldEvents()
         }
     }
 
@@ -497,68 +728,6 @@ object keyboardHelper {
         }
     }
 
-    private suspend fun processEventQueue() {
-        synchronized(queueLock) {
-            if (isProcessing || eventQueue.isEmpty()) return
-            isProcessing = true
-        }
-
-        try {
-            val unsentEvents = synchronized(queueLock) {
-                eventQueue.filter { !it.isSent }
-            }
-            // Special case: If only 1 event, sync with node first
-            if (unsentEvents.size <= 1) {
-                Log.d("EDU_SCREEN", "🔄 Single event detected, syncing with node text first")
-                syncWithNodeText()
-            } else {
-                Log.e("EDU_SCREEN", "➡️ Processing ${unsentEvents.size} queued events")
-            }
-
-            // Calculate final text based on current strategy
-            val finalText = calculateFinalText(unsentEvents)
-
-            // Execute the text update on main thread
-            withContext(Dispatchers.Main) {
-                executeTextUpdate(finalText, unsentEvents)
-                // Schedule background sync after processing is complete
-                startBackgroundSync()
-            }
-
-            // Mark events as sent and update timestamps
-            val sendTime = System.currentTimeMillis()
-            synchronized(queueLock) {
-                unsentEvents.forEach { event ->
-                    event.isSent = true
-                    event.finalText = finalText
-                    event.timeSend = sendTime
-                }
-                lastSentEventTime = sendTime
-            }
-
-            Log.d(
-                "EDU_SCREEN",
-                "✅ Processed ${unsentEvents.size} events, final text length: ${finalText.length}"
-            )
-
-            // Continue processing if there are more events
-            val hasMoreEvents = synchronized(queueLock) {
-                eventQueue.any { !it.isSent }
-            }
-
-            if (hasMoreEvents) {
-                // Schedule next batch processing with small delay
-                delay(10) // Small delay to prevent overwhelming
-                processEventQueue()
-            } else {
-                synchronized(queueLock) { isProcessing = false }
-            }
-
-        } catch (e: Exception) {
-            Log.e("EDU_SCREEN", "❌ Error processing event queue: ${e.message}", e)
-            synchronized(queueLock) { isProcessing = false }
-        }
-    }
 
     private fun calculateFinalText(events: List<TextEvent>): String {
         val unsentEvents = synchronized(queueLock) {
@@ -569,8 +738,7 @@ object keyboardHelper {
         // Strategy 2.1: If there are unsent events, use previous event's finalText or currentText
         val baseText = if (unsentEvents.isNotEmpty()) {
             Log.d(
-                "EDU_SCREEN",
-                "🧮 Using queue-based calculation (${unsentEvents.size} unsent events)"
+                "EDU_SCREEN", "🧮 Using queue-based calculation (${unsentEvents.size} unsent events)"
             )
 
             // Find the last sent event to get its finalText
@@ -581,8 +749,7 @@ object keyboardHelper {
 
             if (lastSentEvent != null) {
                 Log.d(
-                    "EDU_SCREEN",
-                    "📋 Using previous event finalText: '${lastSentEvent.finalText}'"
+                    "EDU_SCREEN", "📋 Using previous event finalText: '${lastSentEvent.finalText}'"
                 )
                 lastSentEvent.finalText
             } else {
@@ -648,7 +815,7 @@ object keyboardHelper {
 
     private fun getNodeText(nodeD: AccessibilityNodeInfo? = null): String? {
         return try {
-            val node = nodeD?: getEditableNode()
+            val node = nodeD ?: getEditableNode()
             if (node != null) {
                 val hint = node.hintText?.toString()
                 val originalRaw = node.text?.toString()
@@ -720,8 +887,7 @@ object keyboardHelper {
                         )
                     }
                     val selectionSuccess = node.performAction(
-                        AccessibilityNodeInfo.ACTION_SET_SELECTION,
-                        selectionArgs
+                        AccessibilityNodeInfo.ACTION_SET_SELECTION, selectionArgs
                     )
                     Log.d(
                         "EDU_SCREEN",
@@ -744,10 +910,7 @@ object keyboardHelper {
     }
 
     private fun calculateSelectionPosition(
-        oldText: String,
-        newText: String,
-        currentSelection: Int,
-        events: List<TextEvent>
+        oldText: String, newText: String, currentSelection: Int, events: List<TextEvent>
     ): Int {
         // If no selection info, default to end
         if (currentSelection < 0) {
@@ -764,16 +927,48 @@ object keyboardHelper {
                     val insertedText = event.text
                     if (insertedText.isNotEmpty()) {
                         // Move cursor to after the inserted text
-                        newPosition = currentSelection + insertedText.codePointCount(0, insertedText.length)
+                        newPosition =
+                            currentSelection + insertedText.codePointCount(0, insertedText.length)
                     } else {
                         newPosition = newText.length
                     }
                 }
 
                 event.action.startsWith("BACKSPACE") -> {
-                    // For backspace, adjust position based on deleted characters
-                    val deletedCount = event.action.substringAfter("_").toIntOrNull() ?: 1
-                    newPosition = (currentSelection - deletedCount).coerceAtLeast(0)
+                    if (event.action == "BACKSPACE_SELECTION") {
+                        // For selection deletion, cursor should be at the start of the deleted selection
+                        if (event.selectionStart >= 0) {
+                            newPosition = event.selectionStart.coerceAtMost(newText.length)
+                            Log.d("EDU_SCREEN", "📍 BACKSPACE_SELECTION: cursor → ${newPosition}")
+                        } else {
+                            // Fallback if selection info not available
+                            newPosition =
+                                (currentSelection - 1).coerceAtLeast(0).coerceAtMost(newText.length)
+                        }
+                    } else {
+                        // For normal backspace, adjust position based on deleted characters
+                        val deletedCount = event.action.substringAfter("_").toIntOrNull() ?: 1
+                        newPosition = (currentSelection - deletedCount).coerceAtLeast(0)
+                    }
+                }
+
+                event.action.startsWith("DELETE") -> {
+                    if (event.action == "DELETE_SELECTION") {
+                        // For selection deletion, cursor should be at the start of the deleted selection
+                        if (event.selectionStart >= 0) {
+                            newPosition = event.selectionStart.coerceAtMost(newText.length)
+                            Log.d("EDU_SCREEN", "📍 DELETE_SELECTION: cursor → ${newPosition}")
+                        } else {
+                            // Fallback if selection info not available
+                            newPosition =
+                                (currentSelection - 1).coerceAtLeast(0).coerceAtMost(newText.length)
+                        }
+                    } else {
+                        // For DELETE (forward delete), cursor position stays the same
+                        // Characters after cursor are removed, so position doesn't change
+                        // But we need to ensure it's within new text bounds
+                        newPosition = currentSelection.coerceAtMost(newText.length)
+                    }
                 }
 
                 event.action == "SET_TEXT" -> {
@@ -786,7 +981,8 @@ object keyboardHelper {
                     val appendedText = event.text
                     if (appendedText.isNotEmpty()) {
                         // Move cursor to after the appended text
-                        newPosition = currentSelection + appendedText.codePointCount(0, appendedText.length)
+                        newPosition =
+                            currentSelection + appendedText.codePointCount(0, appendedText.length)
                     } else {
                         newPosition = newText.length
                     }
@@ -796,7 +992,8 @@ object keyboardHelper {
                     // For paste, move cursor to end of pasted text
                     val pastedText = event.text
                     if (pastedText.isNotEmpty()) {
-                        newPosition = currentSelection + pastedText.codePointCount(0, pastedText.length)
+                        newPosition =
+                            currentSelection + pastedText.codePointCount(0, pastedText.length)
                     } else {
                         newPosition = newText.length
                     }
@@ -851,8 +1048,6 @@ object keyboardHelper {
     }
 
 
-
-
     fun cleanup() {
         backgroundSyncJob?.cancel()
         backgroundTextJob?.cancel()
@@ -861,7 +1056,7 @@ object keyboardHelper {
         clipboardManager = null
         applicationContext = null
         isPasteDelayActive = false
-        lastPasteTime = 0L
+        lastTimeProcessSpecialEvent = 0L
         Log.d("EDU_SCREEN", "🧹 KeyboardHelper cleanup completed")
     }
 }

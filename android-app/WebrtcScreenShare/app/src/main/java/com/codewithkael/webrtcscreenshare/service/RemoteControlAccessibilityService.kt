@@ -25,7 +25,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "RemoteControl"
         private var serviceInstance: RemoteControlAccessibilityService? = null
-        private val mainHandler = Handler(Looper.getMainLooper())
+
 
         fun dispatchCommand(command: RemoteControlCommand) {
             val service = serviceInstance
@@ -37,11 +37,12 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "⚠️ Gesture dispatch requires API 24+")
                 return
             }
-            mainHandler.post {
-                service.handleCommand(command)
-            }
+            service.handleCommand(command)
+
         }
     }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // Gesture handlers
     private lateinit var dispatcher: GestureDispatcher
@@ -59,7 +60,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
             pointerManager = PointerManager(dispatcher)
         }
         simpleGestureHandler = SimpleGestureHandler(this)
-        keyboardHelper.setup(this){
+        keyboardHelper.setup(this) {
             getRootInActiveWindow()
         }
         Log.d(TAG, "✅ AccessibilityService connected")
@@ -97,12 +98,20 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun handleCommand(command: RemoteControlCommand) {
         val metrics = getScreenMetrics()
-
         when (command.type.uppercase()) {
-            "POINTER" -> handlePointerCommand(command, metrics)
+            "POINTER" -> mainHandler.post {
+                handlePointerCommand(command, metrics)
+            }
+
             "KEYBOARD" -> keyboardHelper.handleKeyboardCommand(command)
-            "TAP" -> handleTapCommand(command, metrics)
-            "SWIPE" -> handleSwipeCommand(command, metrics)
+            "TAP" -> mainHandler.post {
+                handleTapCommand(command, metrics)
+            }
+
+            "SWIPE" -> mainHandler.post {
+                handleSwipeCommand(command, metrics)
+            }
+
             else -> Log.w(TAG, "⚠️ Unknown command type: ${command.type}")
         }
     }
