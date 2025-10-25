@@ -74,6 +74,7 @@ function App() {
   } = useWebSocket({
     url: wsUrl,
     onMessage: handleWebSocketMessage,
+    onBinaryMessage: handleBinaryMessage,
     onError: handleWebSocketError,
     onOpen: handleWebSocketOpen,
     onClose: handleWebSocketClose
@@ -463,6 +464,31 @@ function App() {
     }, [handleKeyDown, handlePasteEvent, shouldCaptureKeyboard])
 
   // end handle keyboard events
+  
+  /**
+   * Handle binary audio messages from WebSocket
+   */
+  function handleBinaryMessage(buffer: ArrayBuffer) {
+    console.log('🎵 [BINARY] Received binary message:', buffer.byteLength, 'bytes')
+    
+    // Only process if we have a selected device and audio player
+    if (!selectedDeviceId || !audioPlayerRef.current) {
+      console.warn('⚠️ [BINARY] No selected device or audio player, ignoring binary message')
+      return
+    }
+    
+    try {
+      // Ensure AudioContext is resumed
+      audioPlayerRef.current.resume()
+      
+      // Process binary audio data directly
+      audioPlayerRef.current.processBinaryAudioData(buffer, selectedDeviceId)
+      console.log('🎵 [BINARY] Binary audio data processed successfully')
+    } catch (error) {
+      console.error('❌ [BINARY] Error processing binary message:', error)
+    }
+  }
+  
   function handleWebSocketMessage(message: any) {
     console.log('WebSocket message received:', message)
 
@@ -564,46 +590,6 @@ function App() {
             // Minor size change, just update without loading state
             console.log('📏 Minor size change, updating without loading state')
             setPhysicalSize(newPhysicalSize)
-          }
-        }
-        break
-        
-      case 'INTERNAL_AUDIO':
-        // Handle internal audio from Android device
-        console.log('🎵 Received INTERNAL_AUDIO message:', {
-          deviceId: message.deviceId,
-          selectedDeviceId,
-          hasData: !!message.data,
-          dataKeys: message.data ? Object.keys(message.data) : []
-        })
-        
-        if (selectedDeviceId && message.deviceId === selectedDeviceId && message.data) {
-          const { audioData, sampleRate, channels } = message.data
-          console.log('🎵 Audio data details:', {
-            hasAudioData: !!audioData,
-            audioDataLength: audioData?.length || 0,
-            sampleRate,
-            channels,
-            playerReady: !!audioPlayerRef.current
-          })
-          
-          if (audioPlayerRef.current && audioData) {
-            // Ensure AudioContext is resumed
-            audioPlayerRef.current.resume()
-            audioPlayerRef.current.processAudioData(audioData, sampleRate || 44100, channels || 2)
-            console.log('🎵 Audio data processed successfully')
-          } else if (!audioData) {
-            console.warn('⚠️ Audio data is missing in message')
-          } else if (!audioPlayerRef.current) {
-            console.warn('⚠️ Audio player not initialized')
-          }
-        } else {
-          if (!selectedDeviceId) {
-            console.warn('⚠️ No device selected, ignoring audio')
-          } else if (message.deviceId !== selectedDeviceId) {
-            console.warn('⚠️ Audio from different device, ignoring')
-          } else if (!message.data) {
-            console.warn('⚠️ No data in INTERNAL_AUDIO message')
           }
         }
         break

@@ -4,11 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MediaProjectionAccessibilityService : AccessibilityService() {
 
@@ -26,7 +27,7 @@ class MediaProjectionAccessibilityService : AccessibilityService() {
         )
     }
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val mainScope = MainScope()
     private var hasProcessedDialog = false
     private var attemptCount = 0
     private var lastDialogTime = 0L
@@ -54,7 +55,10 @@ class MediaProjectionAccessibilityService : AccessibilityService() {
                     lastDialogTime = currentTime
                     
                     // Thử click ngay sau 10ms
-                    handler.postDelayed({ tryAutoClick() }, 10)
+                    mainScope.launch {
+                        delay(10)
+                        tryAutoClick()
+                    }
                 }
             }
         }
@@ -104,7 +108,10 @@ class MediaProjectionAccessibilityService : AccessibilityService() {
         
         // Chỉ retry nếu vẫn còn thấy dialog và chưa quá 5 lần
         if (!hasProcessedDialog && foundDialog && attemptCount < 5) {
-            handler.postDelayed({ tryAutoClick() }, 50)
+            mainScope.launch {
+                delay(50)
+                tryAutoClick()
+            }
         } else if (!foundDialog) {
             // Dialog đã đóng, dừng retry
             hasProcessedDialog = true
@@ -189,7 +196,7 @@ class MediaProjectionAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         isEnabled = false
-        handler.removeCallbacksAndMessages(null)
+        // mainScope will be cancelled automatically when service is destroyed
         Log.d(TAG, "❌ Service destroyed")
     }
 }

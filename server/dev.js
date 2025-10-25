@@ -16,7 +16,7 @@ app.use(express.json());
 
 // Store connected devices and viewers
 const devices = new Map(); // deviceId -> { connection, deviceInfo, stream }
-const viewers = new Map(); // viewerId -> { connection }
+const viewers = new Map(); // viewerId -> { connection, supportsBinary, capabilities }
 
 // WebSocket Server
 const wss = new WebSocketServer({ 
@@ -78,6 +78,20 @@ wss.on('connection', (ws, req) => {
   
   ws.on('message', (data) => {
     try {
+      // Check if message is binary or JSON
+      if (Buffer.isBuffer(data) && data.length >= 12) {
+        // Try to parse as binary protocol
+        const version = data[0];
+        const messageType = data[1];
+        
+        if (version === 0x01 && messageType === 0x01) {
+          // Binary INTERNAL_AUDIO message
+          handleBinaryInternalAudio(ws, data);
+          return;
+        }
+      }
+      
+      // Default: parse as JSON
       const message = JSON.parse(data.toString());
       console.log('📨 Message received:', message.type);
       handleMessage(ws, message);
@@ -255,10 +269,16 @@ function handleDeviceStopStream(ws, message) {
 
 function handleViewerJoin(ws, message) {
   const viewerId = uuidv4();
+  const { capabilities } = message;
+  
+  // Track binary audio support capability
+  const supportsBinary = capabilities?.supportsBinaryAudio || false;
   
   viewers.set(viewerId, {
     connection: ws,
-    activeDevices: new Set()
+    activeDevices: new Set(),
+    supportsBinary: supportsBinary,
+    capabilities: capabilities || {}
   });
   
   // Send current devices to new viewer (only connected devices)
@@ -266,7 +286,7 @@ function handleViewerJoin(ws, message) {
     .filter(d => d.deviceInfo.isConnected)
     .map(d => d.deviceInfo);
   
-  console.log(`📤 Sending DEVICES_LIST to viewer ${viewerId}:`, deviceList.length, 'devices');
+  console.log(`📤 Sending DEVICES_LIST to viewer ${viewerId} - Binary audio: ${supportsBinary ? 'SUPPORTED' : 'NOT SUPPORTED'}:`, deviceList.length, 'devices');
   console.log('📱 Device details:', deviceList);
   
   ws.send(JSON.stringify({
@@ -445,6 +465,93 @@ function handleInternalAudio(ws, message) {
   });
   
   console.log(`✅ [SERVER] Audio broadcast to ${sentCount}/${viewers.size} viewers`);
+}
+
+/**
+ * Handle binary INTERNAL_AUDIO messages
+ * Binary protocol: Version(1) | MessageType(1) | SampleRate(2) | Channels(1) | DeviceIdLen(1) | PayloadLen(4) | Reserved(2) | DeviceId(variable) | AudioData(variable)
+ */
+function handleBinaryInternalAudio(ws, buffer) {
+  try {
+    if (buffer.length < 12) {
+      console.error('❌ [BINARY] Invalid binary message length:', buffer.length);
+      return;
+    }
+    
+    let offset = 0;
+    
+    // Parse header
+    const version = buffer[offset++];
+    const messageType = buffer[offset++];
+    const sampleRate = buffer.readUInt16LE(offset); offset += 2;
+    const channels = buffer[offset++];
+    const deviceIdLen = buffer[offset++];
+    const payloadLen = buffer.readUInt32LE(offset); offset += 4;
+    
+    // Skip reserved bytes
+    offset += 2;
+    
+    if (buffer.length < 12 + deviceIdLen + payloadLen) {
+      console.error('❌ [BINARY] Buffer too short for declared lengths');
+      return;
+    }
+    
+    // Parse device ID
+    const deviceId = buffer.subarray(offset, offset + deviceIdLen).toString('utf8');
+    offset += deviceIdLen;
+    
+    // Parse audio data
+    const audioData = buffer.subarray(offset, offset + payloadLen);
+    
+    console.log('🎵 [BINARY] Audio received:', {
+      deviceId,
+      sampleRate,
+      channels,
+      audioBytes: audioData.length,
+      originalSize: buffer.length
+    });
+    
+    const device = devices.get(deviceId);
+    if (!device) {
+      console.warn('❌ [BINARY] Audio from unknown device:', deviceId);
+      return;
+    }
+    
+    // Split viewers by binary capability
+    let binaryViewers = 0;
+    let jsonViewers = 0;
+    
+    viewers.forEach(viewer => {
+      try {
+        if (viewer.supportsBinary) {
+          // Send binary data directly to binary-capable viewers
+          viewer.connection.send(buffer);
+          binaryViewers++;
+        } else {
+          // Convert to Base64 for legacy viewers
+          const base64AudioData = audioData.toString('base64');
+          const audioMessage = {
+            type: 'INTERNAL_AUDIO',
+            deviceId: deviceId,
+            data: {
+              audioData: base64AudioData,
+              sampleRate: sampleRate,
+              channels: channels
+            }
+          };
+          viewer.connection.send(JSON.stringify(audioMessage));
+          jsonViewers++;
+        }
+      } catch (error) {
+        console.error('❌ [BINARY] Error sending audio to viewer:', error);
+      }
+    });
+    
+    console.log(`✅ [BINARY] Audio broadcast: ${binaryViewers} binary viewers, ${jsonViewers} JSON viewers (${audioData.length} bytes)`);
+    
+  } catch (error) {
+    console.error('❌ [BINARY] Error processing binary audio:', error);
+  }
 }
 
 function handleDeviceScreenInfo(ws, message) {

@@ -42,6 +42,8 @@ export const MessageTypes = {
   // Status updates
   DEVICE_STATUS: 'DEVICE_STATUS',
   DEVICES_LIST: 'DEVICES_LIST',
+  DEVICE_SCREEN_INFO: 'DEVICE_SCREEN_INFO',
+  INTERNAL_AUDIO: 'INTERNAL_AUDIO',
   
   // Error handling
   ERROR: 'ERROR'

@@ -2,9 +2,9 @@ package com.codewithkael.webrtcscreenshare.gesture
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 import java.util.ArrayDeque
 
 /**
@@ -19,7 +19,7 @@ class GestureDispatcher(
 
     private val gestureQueue = ArrayDeque<GestureTask>()
     private var gestureInFlight = false
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainScope = MainScope()
 
     /**
      * Add a gesture task to the queue
@@ -59,7 +59,7 @@ class GestureDispatcher(
             gesture,
             object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
-                    mainHandler.post {
+                    mainScope.launch {
                         gestureInFlight = false
                         task.onResult(true)
                         processNext()
@@ -67,7 +67,7 @@ class GestureDispatcher(
                 }
 
                 override fun onCancelled(gestureDescription: GestureDescription?) {
-                    mainHandler.post {
+                    mainScope.launch {
                         gestureInFlight = false
                         Log.w(TAG, "⚠️ Gesture cancelled for pointer ${task.pointerId}")
                         task.onResult(false)
@@ -79,7 +79,7 @@ class GestureDispatcher(
         )
 
         if (!success) {
-            mainHandler.post {
+            mainScope.launch {
                 gestureInFlight = false
                 Log.e(TAG, "❌ dispatchGesture failed for pointer ${task.pointerId}")
                 task.onResult(false)

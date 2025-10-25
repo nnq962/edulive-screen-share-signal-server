@@ -12,6 +12,11 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.codewithkael.webrtcscreenshare.R
 import com.codewithkael.webrtcscreenshare.repository.MainRepository
 import dagger.hilt.android.AndroidEntryPoint
@@ -42,6 +47,8 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
     private var wsUrl: String = "ws://192.168.1.101:3001/ws"
     private var isInitialized: Boolean = false
     private var isStreaming: Boolean = false
+    
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
@@ -97,10 +104,11 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
                         mainRepository.sendScreenShareConnection(it)
                         
                         // Setup audio AFTER screen capture with delay
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        serviceScope.launch {
+                            delay(1500)
                             Log.d("EDU_SCREEN", "🎧 Setting up audio for RequestConnectionIntent")
                             setupMediaProjectionForAudio(permission)
-                        }, 1500)
+                        }
                     }
                 }
                 "PrepareStreamingIntent"->{
@@ -123,12 +131,13 @@ class WebrtcService @Inject constructor() : Service() , MainRepository.Listener 
                     
                     // IMPORTANT: Wait for screen capture to fully initialize its MediaProjection
                     // before creating a second MediaProjection for audio
-                    // Use Handler to avoid blocking service thread
+                    // Use coroutines to avoid blocking service thread
                     Log.d("EDU_SCREEN", "⏰ Scheduling audio setup in 1.5 seconds...")
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    serviceScope.launch {
+                        delay(1500) // 1.5 seconds delay
                         Log.d("EDU_SCREEN", "🎧 Now setting up MediaProjection for audio")
                         setupMediaProjectionForAudio(permission)
-                    }, 1500) // 1.5 seconds delay
+                    }
                     
                     isStreaming = false
                     Log.d("EDU_SCREEN", "✅ PrepareStreamingIntent completed (audio will start in 1.5s)")

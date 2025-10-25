@@ -3,6 +3,11 @@ package com.codewithkael.webrtcscreenshare.repository
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.codewithkael.webrtcscreenshare.audio.InternalAudioCapturer
 import com.codewithkael.webrtcscreenshare.socket.SocketClient
 import com.codewithkael.webrtcscreenshare.utils.DataModel
@@ -23,6 +28,7 @@ class MainRepository @Inject constructor(
 
     private lateinit var username: String
     private var activeViewerId: String? = null
+    private val repositoryScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var surfaceView: SurfaceViewRenderer
     private var wsUrl: String = "ws://192.168.1.101:3001/ws"
     var listener: Listener? = null
@@ -61,21 +67,22 @@ class MainRepository @Inject constructor(
         }
     }
     
-    fun setMediaProjectionForAudio(projection: android.media.projection.MediaProjection) {
+     fun setMediaProjectionForAudio(projection: android.media.projection.MediaProjection) {
         Log.d("EDU_SCREEN", "🎧 setMediaProjectionForAudio() called")
         this.mediaProjection = projection
         Log.d("EDU_SCREEN", "🎧 MediaProjection stored")
         
         // Delay audio capture start to avoid conflict with WebRTC
         Log.d("EDU_SCREEN", "🎧 Delaying audio capture start by 2 seconds to let WebRTC stabilize...")
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+        repositoryScope.launch {
+            delay(2000) // 2 second delay
             Log.d("EDU_SCREEN", "🎧 Starting internal audio capture after delay")
             startInternalAudioCapture()
             Log.d("EDU_SCREEN", "🎧 startInternalAudioCapture() completed")
-        }, 2000) // 2 second delay
+        }
     }
     
-    private fun startInternalAudioCapture() {
+    private suspend fun startInternalAudioCapture() {
         Log.d("EDU_SCREEN", "🎧 startInternalAudioCapture() method entered")
         Log.d("EDU_SCREEN", "🎧 Android SDK: ${Build.VERSION.SDK_INT}")
         
@@ -99,8 +106,8 @@ class MainRepository @Inject constructor(
             
             Log.d("EDU_SCREEN", "🎧 Creating InternalAudioCapturer instance...")
             internalAudioCapturer = InternalAudioCapturer(mediaProjection!!) { audioData, sampleRate, channels ->
-                // Send audio data via WebSocket
-                socketClient.sendInternalAudio(audioData, sampleRate, channels)
+                // Send audio data via binary WebSocket protocol
+                socketClient.sendInternalAudioBinary(audioData, sampleRate, channels)
             }
             
             Log.d("EDU_SCREEN", "🎧 Calling startCapture()...")
@@ -109,7 +116,12 @@ class MainRepository @Inject constructor(
                 Log.d("EDU_SCREEN", "✅ Internal audio capture started successfully!")
             } else {
                 Log.e("EDU_SCREEN", "❌ Failed to start internal audio capture - startCapture() returned false")
+                Log.e("EDU_SCREEN", "❌ This might be due to missing RECORD_AUDIO_OUTPUT permission")
+                Log.e("EDU_SCREEN", "❌ App needs to be signed with system signature or installed as system app")
             }
+        } catch (e: SecurityException) {
+            Log.e("EDU_SCREEN", "❌ SecurityException in startInternalAudioCapture: ${e.message}", e)
+            Log.e("EDU_SCREEN", "❌ Missing RECORD_AUDIO_OUTPUT permission - app needs system-level access")
         } catch (e: Exception) {
             Log.e("EDU_SCREEN", "❌ Exception in startInternalAudioCapture: ${e.message}", e)
             e.printStackTrace()

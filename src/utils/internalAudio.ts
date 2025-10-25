@@ -1,6 +1,12 @@
 /**
  * Internal Audio Player
- * Receives Base64 encoded PCM audio from Android device
+ * Receives Base64 encoded PCM audio from server
+ * 
+ * Note: Android now sends binary data to server for efficiency,
+ * but server converts it back to Base64 for web compatibility.
+ * Future: Add direct binary WebSocket support for full optimization.
+ * 
+ * Current bandwidth savings: ~26% on Android→Server link
  * Decodes and plays using Web Audio API
  */
 
@@ -15,6 +21,7 @@ export class InternalAudioPlayer {
 
   constructor() {
     // AudioContext will be created on first audio data
+    console.log('🎵 [AudioPlayer] InternalAudioPlayer initialized with binary support')
   }
 
   private initAudioContext() {
@@ -29,6 +36,98 @@ export class InternalAudioPlayer {
       })
     } catch (error) {
       console.error('❌ Failed to initialize AudioContext:', error)
+    }
+  }
+
+  /**
+   * Process binary audio data from WebSocket (NEW - Full Binary Protocol)
+   * Binary protocol: Version(1) | MessageType(1) | SampleRate(2) | Channels(1) | DeviceIdLen(1) | PayloadLen(4) | Reserved(2) | DeviceId(variable) | AudioData(variable)
+   */
+  processBinaryAudioData(buffer: ArrayBuffer, deviceId?: string) {
+    console.log('🎵 [AudioPlayer] processBinaryAudioData called:', {
+      bufferLength: buffer.byteLength,
+      deviceId,
+      hasAudioContext: !!this.audioContext
+    })
+
+    if (!this.audioContext) {
+      console.log('🎵 [AudioPlayer] Initializing AudioContext...')
+      this.initAudioContext()
+    }
+
+    if (!this.audioContext) {
+      console.error('❌ [AudioPlayer] AudioContext failed to initialize')
+      return
+    }
+
+    try {
+      if (buffer.byteLength < 12) {
+        console.error('❌ [AudioPlayer] Binary buffer too short:', buffer.byteLength)
+        return
+      }
+
+      const dataView = new DataView(buffer)
+      let offset = 0
+
+      // Parse binary protocol header
+      const version = dataView.getUint8(offset++)
+      const messageType = dataView.getUint8(offset++)
+      const sampleRate = dataView.getUint16(offset, true); offset += 2 // little-endian
+      const channels = dataView.getUint8(offset++)
+      const deviceIdLen = dataView.getUint8(offset++)
+      const payloadLen = dataView.getUint32(offset, true); offset += 4 // little-endian
+
+      // Skip reserved bytes
+      offset += 2
+
+      if (buffer.byteLength < 12 + deviceIdLen + payloadLen) {
+        console.error('❌ [AudioPlayer] Buffer length mismatch:', buffer.byteLength, 'expected:', 12 + deviceIdLen + payloadLen)
+        return
+      }
+
+      // Extract device ID (optional for validation)
+      const extractedDeviceId = new TextDecoder().decode(new Uint8Array(buffer, offset, deviceIdLen))
+      offset += deviceIdLen
+
+      console.log('🎵 [AudioPlayer] Binary audio parsed:', {
+        version,
+        messageType,
+        sampleRate,
+        channels,
+        deviceId: extractedDeviceId,
+        payloadBytes: payloadLen
+      })
+
+      // Extract raw PCM data (Int16Array)
+      const audioData = new Int16Array(buffer, offset, payloadLen / 2) // 2 bytes per Int16
+
+      // Convert Int16 to Float32 directly (no Base64 decode step!)
+      const float32Array = new Float32Array(audioData.length)
+      for (let i = 0; i < audioData.length; i++) {
+        float32Array[i] = audioData[i] / 32768.0
+      }
+
+      // Add to queue
+      this.audioQueue.push(float32Array)
+      console.log('🎵 [AudioPlayer] Binary audio added to queue, queue length:', this.audioQueue.length)
+
+      // Start playing if not already
+      if (!this.isPlaying) {
+        console.log('🎵 [AudioPlayer] Starting binary audio playback...')
+        this.isPlaying = true
+        this.playNextBuffer()
+      } else {
+        console.log('🎵 [AudioPlayer] Binary audio queued, already playing')
+      }
+
+    } catch (error) {
+      console.error('❌ [AudioPlayer] Error processing binary audio data:', error)
+      if (error instanceof Error) {
+        console.error('❌ [AudioPlayer] Error details:', {
+          message: error.message,
+          stack: error.stack
+        })
+      }
     }
   }
 

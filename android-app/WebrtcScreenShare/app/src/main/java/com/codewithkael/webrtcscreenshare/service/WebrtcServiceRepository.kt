@@ -3,14 +3,19 @@ package com.codewithkael.webrtcscreenshare.service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 class WebrtcServiceRepository @Inject constructor(
     private val context:Context
 ) {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     fun startIntent(username:String, wsUrl: String = "ws://192.168.1.101:3001/ws"){
-        val thread = Thread {
+        scope.launch {
             val startIntent = Intent(context, WebrtcService::class.java)
             startIntent.action = "StartIntent"
             startIntent.putExtra("username",username)
@@ -22,11 +27,10 @@ class WebrtcServiceRepository @Inject constructor(
                 context.startService(startIntent)
             }
         }
-        thread.start()
     }
 
     fun requestConnection(target: String){
-        val thread = Thread {
+        scope.launch {
             val startIntent = Intent(context, WebrtcService::class.java)
             startIntent.action = "RequestConnectionIntent"
             startIntent.putExtra("target",target)
@@ -37,11 +41,10 @@ class WebrtcServiceRepository @Inject constructor(
                 context.startService(startIntent)
             }
         }
-        thread.start()
     }
 
     fun acceptCAll(target:String){
-        val thread = Thread {
+        scope.launch {
             val startIntent = Intent(context, WebrtcService::class.java)
             startIntent.action = "AcceptCallIntent"
             startIntent.putExtra("target",target)
@@ -51,11 +54,10 @@ class WebrtcServiceRepository @Inject constructor(
                 context.startService(startIntent)
             }
         }
-        thread.start()
     }
 
     fun endCallIntent() {
-        val thread = Thread {
+        scope.launch {
             val startIntent = Intent(context, WebrtcService::class.java)
             startIntent.action = "EndCallIntent"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -64,11 +66,10 @@ class WebrtcServiceRepository @Inject constructor(
                 context.startService(startIntent)
             }
         }
-        thread.start()
     }
 
     fun startStreamingToWeb() {
-        val thread = Thread {
+        scope.launch {
             val startIntent = Intent(context, WebrtcService::class.java)
             startIntent.action = "PrepareStreamingIntent"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -77,12 +78,10 @@ class WebrtcServiceRepository @Inject constructor(
                 context.startService(startIntent)
             }
         }
-        thread.start()
     }
 
     fun stopIntent() {
-        val thread = Thread {
-
+        scope.launch {
             val startIntent = Intent(context, WebrtcService::class.java)
             startIntent.action = "StopIntent"
             // Stop should not require foreground start; use startService or stopService directly
@@ -92,7 +91,6 @@ class WebrtcServiceRepository @Inject constructor(
                 try { context.stopService(startIntent) } catch (_: Exception) {}
             }
         }
-        thread.start()
     }
 
 }

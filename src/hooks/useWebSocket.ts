@@ -6,6 +6,7 @@ interface UseWebSocketOptions {
   url: string;
   deviceId?: string;
   onMessage?: (message: WebSocketMessage) => void;
+  onBinaryMessage?: (data: ArrayBuffer) => void;
   onError?: (error: Event) => void;
   onOpen?: () => void;
   onClose?: () => void;
@@ -20,7 +21,7 @@ interface UseWebSocketReturn {
 }
 
 export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn => {
-  const { url, deviceId, onMessage, onError, onOpen, onClose } = options;
+  const { url, deviceId, onMessage, onBinaryMessage, onError, onOpen, onClose } = options;
   
   const [isConnected, setIsConnected] = useState(false);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
@@ -33,10 +34,10 @@ export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn =
   const isConnectingRef = useRef(false);
 
   // Persist callbacks to avoid re-creating connections on every render
-  const callbacksRef = useRef({ onMessage, onError, onOpen, onClose });
+  const callbacksRef = useRef({ onMessage, onBinaryMessage, onError, onOpen, onClose });
   useEffect(() => {
-    callbacksRef.current = { onMessage, onError, onOpen, onClose };
-  }, [onMessage, onError, onOpen, onClose]);
+    callbacksRef.current = { onMessage, onBinaryMessage, onError, onOpen, onClose };
+  }, [onMessage, onBinaryMessage, onError, onOpen, onClose]);
 
   const connect = useCallback(() => {
     try {
@@ -54,6 +55,11 @@ export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn =
       isConnectingRef.current = true;
       console.log('Attempting to connect to:', url);
       const ws = new WebSocket(url);
+      
+      // Configure binary type for proper binary message handling
+      ws.binaryType = 'arraybuffer';
+      console.log('🔧 [WEBSOCKET] Set binaryType to:', ws.binaryType);
+      
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -83,7 +89,10 @@ export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn =
         } else {
           try {
             ws.send(JSON.stringify({
-              type: MessageTypes.VIEWER_JOIN
+              type: MessageTypes.VIEWER_JOIN,
+              capabilities: {
+                supportsBinaryAudio: true  // Signal binary audio support
+              }
             }));
           } catch {}
         }
@@ -93,6 +102,33 @@ export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn =
 
       ws.onmessage = (event) => {
         try {
+          console.log('📥 [WEBSOCKET] Received message:', {
+            dataType: typeof event.data,
+            constructor: event.data?.constructor?.name,
+            isArrayBuffer: event.data instanceof ArrayBuffer,
+            isBlob: event.data instanceof Blob,
+            data: event.data
+          });
+          
+          // Check if message is binary or JSON
+          if (event.data instanceof ArrayBuffer) {
+            // Handle binary audio message (ArrayBuffer)
+            console.log('🎵 [BINARY] Received ArrayBuffer message:', event.data.byteLength, 'bytes');
+            callbacksRef.current.onBinaryMessage?.(event.data);
+            return;
+          } else if (event.data instanceof Blob) {
+            // Handle binary audio message (Blob) - convert to ArrayBuffer
+            console.log('🎵 [BINARY] Received Blob message:', event.data.size, 'bytes');
+            event.data.arrayBuffer().then(buffer => {
+              console.log('🎵 [BINARY] Converted Blob to ArrayBuffer:', buffer.byteLength, 'bytes');
+              callbacksRef.current.onBinaryMessage?.(buffer);
+            }).catch(error => {
+              console.error('❌ [BINARY] Error converting Blob to ArrayBuffer:', error);
+            });
+            return;
+          }
+          
+          // Handle JSON message
           const message: WebSocketMessage = JSON.parse(event.data);
           
           switch (message.type) {
@@ -180,7 +216,16 @@ export const useWebSocket = (options: UseWebSocketOptions): UseWebSocketReturn =
           
           callbacksRef.current.onMessage?.(message);
         } catch (err) {
-          console.error('Error parsing WebSocket message:', err);
+          console.error('❌ [WEBSOCKET] Error parsing JSON message:', err);
+          console.error('❌ [WEBSOCKET] Raw data:', event.data);
+          console.error('❌ [WEBSOCKET] Data type:', typeof event.data);
+          console.error('❌ [WEBSOCKET] Data constructor:', event.data?.constructor?.name);
+          
+          // This error might occur if binary data is being sent but not handled properly
+          if (typeof event.data === 'string' && event.data.includes('[object Blob]')) {
+            console.error('❌ [WEBSOCKET] Detected Blob data being stringified - binary handling issue!');
+          }
+          
           setError('Failed to parse message');
         }
       };

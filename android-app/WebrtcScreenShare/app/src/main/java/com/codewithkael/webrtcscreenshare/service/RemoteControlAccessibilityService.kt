@@ -3,8 +3,6 @@ package com.codewithkael.webrtcscreenshare.service
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
@@ -14,6 +12,8 @@ import com.codewithkael.webrtcscreenshare.gesture.GestureDispatcher
 import com.codewithkael.webrtcscreenshare.gesture.PointerManager
 import com.codewithkael.webrtcscreenshare.gesture.SimpleGestureHandler
 import com.codewithkael.webrtcscreenshare.utils.RemoteControlCommand
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 
 /**
  * AccessibilityService for remote control touch gestures
@@ -42,7 +42,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
         }
     }
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainScope = MainScope()
 
     // Gesture handlers
     private lateinit var dispatcher: GestureDispatcher
@@ -99,16 +99,16 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     private fun handleCommand(command: RemoteControlCommand) {
         val metrics = getScreenMetrics()
         when (command.type.uppercase()) {
-            "POINTER" -> mainHandler.post {
+            "POINTER" -> mainScope.launch {
                 handlePointerCommand(command, metrics)
             }
 
             "KEYBOARD" -> keyboardHelper.handleKeyboardCommand(command)
-            "TAP" -> mainHandler.post {
+            "TAP" -> mainScope.launch {
                 handleTapCommand(command, metrics)
             }
 
-            "SWIPE" -> mainHandler.post {
+            "SWIPE" -> mainScope.launch {
                 handleSwipeCommand(command, metrics)
             }
 

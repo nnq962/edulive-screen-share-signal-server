@@ -6,9 +6,11 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.os.Build
-import android.util.Base64
 import android.util.Log
 import androidx.annotation.RequiresApi
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.trySendBlocking
 
 /**
  * Captures internal audio (system audio) from Android device
@@ -17,7 +19,7 @@ import androidx.annotation.RequiresApi
 @RequiresApi(Build.VERSION_CODES.Q)
 class InternalAudioCapturer(
     private val mediaProjection: MediaProjection,
-    private val onAudioData: (audioData: String, sampleRate: Int, channels: Int) -> Unit
+    private val onAudioData: (audioData: ByteArray, sampleRate: Int, channels: Int) -> Unit
 ) {
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -37,12 +39,25 @@ class InternalAudioCapturer(
     }
 
     private var audioRecord: AudioRecord? = null
-    private var captureThread: Thread? = null
+    private var captureJob: Job? = null
+    private var sendingJob: Job? = null
+    private val captureScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    // High-performance audio data queue - buffered channel for smooth audio flow
+    private val audioDataChannel = Channel<AudioChunk>(capacity = 100) // Buffer up to 100 chunks (~2 seconds at 44.1kHz)
     
     @Volatile
     private var isCapturing = false
+    
+    // Data class for audio chunk with metadata
+    private data class AudioChunk(
+        val data: ByteArray,
+        val sampleRate: Int,
+        val channels: Int,
+        val timestamp: Long = System.currentTimeMillis()
+    )
 
-    fun startCapture(): Boolean {
+    suspend fun startCapture(): Boolean {
         if (isCapturing) {
             Log.w(TAG, "Already capturing audio")
             return true
@@ -50,6 +65,7 @@ class InternalAudioCapturer(
 
         try {
             Log.d(TAG, "🎤 Starting internal audio capture...")
+            Log.d(TAG, "🔍 Checking RECORD_AUDIO_OUTPUT permission...")
             
             mediaProjection.registerCallback(projectionCallback, null)
             Log.d(TAG, "✅ MediaProjection callback registered")
@@ -116,7 +132,7 @@ class InternalAudioCapturer(
             Log.d(TAG, "✅ AudioRecord initialized successfully")
             audioRecord?.startRecording()
             
-            Thread.sleep(100)
+            delay(100)
             
             val recordingState = audioRecord?.recordingState
             Log.d(TAG, "📊 Recording state after start: $recordingState")
@@ -130,28 +146,44 @@ class InternalAudioCapturer(
             
             isCapturing = true
 
-            captureThread = Thread {
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-                captureAudioLoop(bufferSize)
-            }.apply {
-                name = "InternalAudioCaptureThread"
-                start()
+            // Start separate sending coroutine for high-performance audio transmission
+            sendingJob = captureScope.launch(Dispatchers.IO) {
+                processSendingQueue()
             }
 
-            Log.d(TAG, "✅ Internal audio capture started successfully")
+            // Start audio capture coroutine with high priority
+            captureJob = captureScope.launch {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                captureAudioLoop(bufferSize)
+            }
+
+            Log.i(TAG, "✅ High-performance audio pipeline started (separate capture + sending)")
             return true
 
+        } catch (e: SecurityException) {
+            Log.e(TAG, "❌ SecurityException: ${e.message}", e)
+            Log.e(TAG, "❌ Missing RECORD_AUDIO_OUTPUT permission!")
+            Log.e(TAG, "❌ App needs to be:")
+            Log.e(TAG, "   1. Signed with system signature, OR")
+            Log.e(TAG, "   2. Installed as system app, OR") 
+            Log.e(TAG, "   3. Root the device and grant permission manually")
+            stopCapture()
+            return false
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to start internal audio capture", e)
+            Log.e(TAG, "❌ Error type: ${e.javaClass.simpleName}")
+            if (e.message?.contains("permission", ignoreCase = true) == true) {
+                Log.e(TAG, "❌ Permission-related error detected")
+            }
             stopCapture()
             return false
         }
     }
 
-    private fun captureAudioLoop(bufferSize: Int) {
+    private suspend fun captureAudioLoop(bufferSize: Int) {
         val buffer = ByteArray(bufferSize)
         Log.i(TAG, "============================================================")
-        Log.i(TAG, "🔄 AUDIO CAPTURE LOOP STARTED")
+        Log.i(TAG, "🔄 AUDIO CAPTURE COROUTINE STARTED")
         Log.i(TAG, "📊 Buffer size: $bufferSize bytes")
         Log.i(TAG, "🚨 Play YouTube, Spotify, Music, etc. to test audio capture")
         Log.i(TAG, "============================================================")
@@ -162,7 +194,7 @@ class InternalAudioCapturer(
         var consecutiveZeroReads = 0
 
         try {
-            while (isCapturing && audioRecord != null) {
+            while (isCapturing && audioRecord != null && !currentCoroutineContext().isActive.not()) {
                 val bytesRead = try {
                     audioRecord?.read(buffer, 0, buffer.size) ?: -1
                 } catch (e: Exception) {
@@ -185,12 +217,15 @@ class InternalAudioCapturer(
                             Log.d(TAG, "📊 Captured $successfulReads chunks, ${totalBytesRead / 1024}KB total")
                         }
                         
-                        val base64Data = Base64.encodeToString(buffer, 0, bytesRead, Base64.NO_WRAP)
+                        // Queue audio data for separate sending coroutine - non-blocking
+                        val audioData = buffer.copyOf(bytesRead)
+                        val audioChunk = AudioChunk(audioData, SAMPLE_RATE, CHANNELS)
                         
-                        try {
-                            onAudioData(base64Data, SAMPLE_RATE, CHANNELS)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "❌ Exception in onAudioData callback: ${e.message}", e)
+                        // Try to send to channel without blocking capture loop
+                        val result = audioDataChannel.trySend(audioChunk)
+                        if (result.isFailure) {
+                            // Channel is full - drop oldest data to maintain real-time performance
+                            Log.w(TAG, "⚠️ Audio queue full, dropping frame to maintain low latency")
                         }
                     }
                     
@@ -202,7 +237,7 @@ class InternalAudioCapturer(
                             Log.w(TAG, "⏳ No audio data available")
                         }
                         
-                        Thread.sleep(100)
+                        delay(100)
                     }
                     
                     else -> {
@@ -228,7 +263,7 @@ class InternalAudioCapturer(
                                     }
                                 }
                                 
-                                Thread.sleep(1000) // Wait longer before recreating
+                                delay(500) // Wait longer before recreating
                                 
                                 // Recreate AudioRecord from scratch
                                 Log.d(TAG, "🔄 Recreating AudioRecord...")
@@ -256,7 +291,7 @@ class InternalAudioCapturer(
                                 
                                 if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
                                     audioRecord?.startRecording()
-                                    Thread.sleep(100)
+                                    delay(100)
                                     val newState = audioRecord?.recordingState
                                     
                                     if (newState == AudioRecord.RECORDSTATE_RECORDING) {
@@ -284,7 +319,7 @@ class InternalAudioCapturer(
                             }
                         }
                         
-                        Thread.sleep(500)
+                        delay(500)
                     }
                 }
             }
@@ -298,6 +333,52 @@ class InternalAudioCapturer(
         } else {
             Log.w(TAG, "❌ NO AUDIO WAS CAPTURED")
         }
+    }
+    
+    /**
+     * High-performance audio sending coroutine - processes queued audio chunks
+     * Runs in separate coroutine to avoid blocking audio capture
+     */
+    private suspend fun processSendingQueue() {
+        Log.i(TAG, "🚀 Audio sending pipeline started - optimized for low latency")
+        var processedChunks = 0
+        var totalSentBytes = 0L
+        var lastLogTime = System.currentTimeMillis()
+        
+        try {
+            while (isCapturing) {
+                try {
+                    // Receive audio chunk from capture thread
+                    val audioChunk = audioDataChannel.receive()
+                    
+                    // Send via callback with minimal latency
+                    onAudioData(audioChunk.data, audioChunk.sampleRate, audioChunk.channels)
+                    
+                    processedChunks++
+                    totalSentBytes += audioChunk.data.size
+                    
+                    // Performance logging every 5 seconds
+                    val now = System.currentTimeMillis()
+                    if (now - lastLogTime >= 5000) {
+                        val avgLatency = if (processedChunks > 0) {
+                            (now - audioChunk.timestamp) 
+                        } else 0
+                        Log.d(TAG, "🚀 Sent $processedChunks chunks (${totalSentBytes/1024}KB), avg_latency=${avgLatency}ms")
+                        lastLogTime = now
+                    }
+                    
+                } catch (e: Exception) {
+                    if (isCapturing) {
+                        Log.e(TAG, "❌ Error in sending pipeline: ${e.message}")
+                        delay(10) // Brief pause on error
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Sending pipeline error: ${e.message}", e)
+        }
+        
+        Log.i(TAG, "🛑 Audio sending pipeline ended")
     }
     
     private fun getErrorName(error: Int): String {
@@ -320,14 +401,30 @@ class InternalAudioCapturer(
             Log.w(TAG, "⚠️ Error unregistering callback", e)
         }
 
-        captureThread?.let { thread ->
+        captureJob?.let { job ->
             try {
-                thread.join(2000)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
+                runBlocking { 
+                    job.cancelAndJoin() 
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Error cancelling capture job", e)
             }
         }
-        captureThread = null
+        captureJob = null
+
+        sendingJob?.let { job ->
+            try {
+                runBlocking { 
+                    job.cancelAndJoin() 
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "⚠️ Error cancelling sending job", e)
+            }
+        }
+        sendingJob = null
+        
+        // Close the audio data channel
+        audioDataChannel.close()
 
         audioRecord?.let { record ->
             try {

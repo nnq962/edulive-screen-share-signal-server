@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.MainScope
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
 import java.net.URI
@@ -21,8 +22,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.Exception
 import kotlin.jvm.Volatile
-import android.os.Handler
-import android.os.Looper
 
 @Singleton
 class SocketClient @Inject constructor(
@@ -41,7 +40,7 @@ class SocketClient @Inject constructor(
     }
 
     var listener:Listener?=null
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainScope = MainScope()
     
     private fun getOrCreateDeviceId(): String {
         val prefs = context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -112,10 +111,10 @@ class SocketClient @Inject constructor(
                 }
                 Log.d("EDU_SCREEN", "onMessage: $model")
                 model?.let {
-                    mainHandler.post {
+                    mainScope.launch {
                         if (it.type == "ERROR") {
                             Log.w("EDU_SCREEN", "⚠️ Server reported error: ${it.message ?: it.data ?: "unknown"}")
-                            return@post
+                            return@launch
                         }
                         if (it.type == "ADMIN_DISCONNECT") {
                             try {
@@ -127,7 +126,7 @@ class SocketClient @Inject constructor(
                                 )
                             } catch (_: Exception) {}
                             try { webSocket?.close(4000, "Admin disconnect") } catch (_: Exception) {}
-                            return@post
+                            return@launch
                         }
                         listener?.onNewMessageReceived(it)
                     }
@@ -137,7 +136,7 @@ class SocketClient @Inject constructor(
             override fun onClose(code: Int, reason: String?, remote: Boolean) {
                 Log.d("EDU_SCREEN", "WebSocket closed: $code, $reason")
                 isConnecting = false
-                mainHandler.post {
+                mainScope.launch {
                     try {
                         listener?.onNewMessageReceived(
                             DataModel(
@@ -246,35 +245,87 @@ class SocketClient @Inject constructor(
     private var audioChunkCount = 0L
     private var lastAudioLogTime = 0L
     
-    fun sendInternalAudio(audioData: String, sampleRate: Int, channels: Int) {
+    /**
+     * Legacy method kept for compatibility - binary mode is always enabled for performance
+     */
+    fun configureBinaryProtocol(enabled: Boolean, enableLogging: Boolean = true) {
+        android.util.Log.i("BINARY_CONFIG", "📊 Binary protocol: ALWAYS ENABLED (high performance mode)")
+    }
+    
+    /**
+     * Send internal audio using binary protocol only (high performance)
+     */
+    fun sendInternalAudioBinary(audioData: ByteArray, sampleRate: Int, channels: Int) {
         try {
-            if (webSocket?.isOpen == true) {
-                val message = DataModel(
-                    type = "INTERNAL_AUDIO",
-                    deviceId = deviceId,
-                    data = mapOf(
-                        "audioData" to audioData,
-                        "sampleRate" to sampleRate,
-                        "channels" to channels
-                    )
-                )
-                sendMessageToSocket(message)
-                audioChunkCount++
-                
-                // Log every 1 second
-                val now = System.currentTimeMillis()
-                if (now - lastAudioLogTime >= 1000) {
-                    android.util.Log.d("AUDIO_SEND", "📤 [AUDIO_ACTIVE] Sent chunk #$audioChunkCount: ${audioData.length} bytes, rate=$sampleRate, ch=$channels")
-                    lastAudioLogTime = now
-                }
-            } else {
+            if (webSocket?.isOpen != true) {
                 android.util.Log.e("AUDIO_SEND", "❌ WebSocket not open! Audio dropped. Socket state: ${webSocket?.isOpen}")
+                return
             }
+            
+            val binaryMessage = createBinaryAudioMessage(audioData, sampleRate, channels)
+            webSocket?.send(binaryMessage)
+            
+            audioChunkCount++
+            
+            // Optimized logging - only every 5 seconds to reduce overhead
+            val now = System.currentTimeMillis()
+            if (now - lastAudioLogTime >= 5000) {
+                android.util.Log.d("AUDIO_SEND", "📤 [BINARY] High-perf mode: #$audioChunkCount chunks, ${audioData.size}→${binaryMessage.size} bytes, rate=$sampleRate")
+                lastAudioLogTime = now
+            }
+            
         } catch (e: Exception) {
-            android.util.Log.e("AUDIO_SEND", "❌ Failed to send internal audio: ${e.message}", e)
+            android.util.Log.e("AUDIO_SEND", "❌ Failed to send binary audio: ${e.message}", e)
         }
     }
-
+    
+    /**
+     * Create binary audio message according to protocol specification
+     */
+    private fun createBinaryAudioMessage(audioData: ByteArray, sampleRate: Int, channels: Int): ByteArray {
+        // Get current device ID safely
+        val currentDeviceId = this.deviceId ?: getOrCreateDeviceId()
+        val deviceIdBytes = currentDeviceId.toByteArray(Charsets.UTF_8)
+        val deviceIdLen = deviceIdBytes.size.toByte()
+        val payloadLen = audioData.size
+        
+        // Calculate total message size: header(12) + deviceId + payload
+        val totalSize = 12 + deviceIdLen + payloadLen
+        val buffer = ByteArray(totalSize)
+        
+        var offset = 0
+        
+        // Header (12 bytes)
+        buffer[offset++] = 0x01 // Version
+        buffer[offset++] = 0x01 // MessageType (INTERNAL_AUDIO)
+        
+        // SampleRate (2 bytes, little-endian)
+        buffer[offset++] = (sampleRate and 0xFF).toByte()
+        buffer[offset++] = ((sampleRate shr 8) and 0xFF).toByte()
+        
+        buffer[offset++] = channels.toByte() // Channels
+        buffer[offset++] = deviceIdLen // DeviceIdLen
+        
+        // PayloadLen (4 bytes, little-endian)
+        buffer[offset++] = (payloadLen and 0xFF).toByte()
+        buffer[offset++] = ((payloadLen shr 8) and 0xFF).toByte()
+        buffer[offset++] = ((payloadLen shr 16) and 0xFF).toByte()
+        buffer[offset++] = ((payloadLen shr 24) and 0xFF).toByte()
+        
+        // Reserved (2 bytes)
+        buffer[offset++] = 0x00
+        buffer[offset++] = 0x00
+        
+        // Device ID
+        System.arraycopy(deviceIdBytes, 0, buffer, offset, deviceIdLen.toInt())
+        offset += deviceIdLen
+        
+        // Audio Payload
+        System.arraycopy(audioData, 0, buffer, offset, payloadLen)
+        
+        return buffer
+    }
+    
     fun onDestroy(){
         webSocket?.close()
         webSocket = null

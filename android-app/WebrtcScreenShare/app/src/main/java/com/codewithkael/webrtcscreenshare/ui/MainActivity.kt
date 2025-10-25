@@ -5,20 +5,22 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import com.codewithkael.webrtcscreenshare.databinding.ActivityMainBinding
 import com.codewithkael.webrtcscreenshare.config.AppConfig
 import com.codewithkael.webrtcscreenshare.repository.MainRepository
 import com.codewithkael.webrtcscreenshare.service.WebrtcService
 import com.codewithkael.webrtcscreenshare.service.WebrtcServiceRepository
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import org.webrtc.MediaStream
-import org.webrtc.RTCStats
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -29,14 +31,8 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
 
     @Inject lateinit var webrtcServiceRepository: WebrtcServiceRepository
     private val capturePermissionRequestCode = 1
-    private val orientationCheckHandler = Handler(Looper.getMainLooper())
-    private val orientationCheckRunnable = object : Runnable {
-        override fun run() {
-            checkOrientationChange()
-            orientationCheckHandler.postDelayed(this, 1000) // Check every second
-        }
-    }
-
+    private var orientationCheckJob: Job? = null
+    private val mainScope : CoroutineScope = CoroutineScope(Dispatchers.Main)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         views= ActivityMainBinding.inflate(layoutInflater)
@@ -81,17 +77,15 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
                 // Reconnect: stop service hard, then start fresh intent and stream
                 webrtcServiceRepository.stopIntent()
                 // small delay to ensure service stops before restarting
-                Thread {
-                    try { Thread.sleep(400) } catch (_: InterruptedException) {}
-                    runOnUiThread {
-                        webrtcServiceRepository.startIntent(username!!, AppConfig.WS_URL)
-                        // if screen permission already granted earlier, StartStreamingToWebIntent will use it
-                        webrtcServiceRepository.startStreamingToWeb()
-                        views.statusText.text = "🔄 Reconnecting..."
-                        views.statusText.setTextColor(android.graphics.Color.parseColor("#FF9800"))
-                        views.toggleConnectionBtn.text = "Disconnect"
-                    }
-                }.start()
+                mainScope.launch {
+                    try { delay(400) } catch (_: Exception) {}
+                    webrtcServiceRepository.startIntent(username!!, AppConfig.WS_URL)
+                    // if screen permission already granted earlier, StartStreamingToWebIntent will use it
+                    webrtcServiceRepository.startStreamingToWeb()
+                    views.statusText.text = "🔄 Reconnecting..."
+                    views.statusText.setTextColor(android.graphics.Color.parseColor("#FF9800"))
+                    views.toggleConnectionBtn.text = "Disconnect"
+                }
             }
         }
 
@@ -180,12 +174,19 @@ class MainActivity : AppCompatActivity(), MainRepository.Listener {
     }
 
     private fun startOrientationMonitoring() {
-        orientationCheckHandler.post(orientationCheckRunnable)
+        orientationCheckJob?.cancel()
+        orientationCheckJob = mainScope.launch {
+            while (true) {
+                checkOrientationChange()
+                delay(1000) // Check every second
+            }
+        }
         Log.d("EDU_SCREEN", "🔄 Started orientation monitoring")
     }
 
     private fun stopOrientationMonitoring() {
-        orientationCheckHandler.removeCallbacks(orientationCheckRunnable)
+        orientationCheckJob?.cancel()
+        orientationCheckJob = null
         Log.d("EDU_SCREEN", "🛑 Stopped orientation monitoring")
     }
 

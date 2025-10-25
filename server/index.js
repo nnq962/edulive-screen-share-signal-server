@@ -22,7 +22,7 @@ if (existsSync('dist')) {
 
 // Store connected devices and viewers
 const devices = new Map(); // deviceId -> { connection, deviceInfo, stream }
-const viewers = new Map(); // viewerId -> { connection }
+const viewers = new Map(); // viewerId -> { connection, supportsBinary, capabilities }
 
 // WebSocket Server
 const wss = new WebSocketServer({ 
@@ -69,6 +69,34 @@ wss.on('connection', (ws, req) => {
   
   ws.on('message', (data) => {
     try {
+      console.log('📥 [SERVER] Received message:', {
+        isBuffer: Buffer.isBuffer(data),
+        length: data.length,
+        firstBytes: Buffer.isBuffer(data) ? Array.from(data.slice(0, Math.min(8, data.length))).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ') : 'N/A'
+      });
+      
+      // Check if message is binary or JSON
+      if (Buffer.isBuffer(data) && data.length >= 12) {
+        // Try to parse as binary protocol
+        const version = data[0];
+        const messageType = data[1];
+        
+        console.log('🔍 [SERVER] Binary check:', {
+          version: '0x' + version.toString(16).padStart(2, '0'),
+          messageType: '0x' + messageType.toString(16).padStart(2, '0'),
+          isBinaryAudio: version === 0x01 && messageType === 0x01
+        });
+        
+        if (version === 0x01 && messageType === 0x01) {
+          // Binary INTERNAL_AUDIO message
+          console.log('🎵 [SERVER] Processing as binary INTERNAL_AUDIO');
+          handleBinaryInternalAudio(ws, data);
+          return;
+        }
+      }
+      
+      // Default: parse as JSON
+      console.log('📝 [SERVER] Processing as JSON message');
       const message = JSON.parse(data.toString());
       handleMessage(ws, message);
     } catch (error) {
@@ -128,10 +156,6 @@ function handleMessage(ws, message) {
       handleIceCandidate(ws, message);
       break;
       
-    case MessageTypes.INTERNAL_AUDIO:
-      handleInternalAudio(ws, message);
-      break;
-      
     case MessageTypes.DEVICE_SCREEN_INFO:
       handleDeviceScreenInfo(ws, message);
       break;
@@ -156,6 +180,12 @@ function handleMessage(ws, message) {
 function handleDeviceRegister(ws, message) {
   const { deviceId, deviceInfo } = message;
   
+  console.log('📱 [DEVICE] Device register:', {
+    deviceId,
+    deviceInfo,
+    existingDevice: devices.has(deviceId)
+  });
+  
   // Allow re-register: close old socket if exists, then replace with new
   if (devices.has(deviceId)) {
     try {
@@ -177,6 +207,9 @@ function handleDeviceRegister(ws, message) {
     },
     stream: null
   });
+  
+  console.log('✅ [DEVICE] Device registered successfully:', deviceId);
+  console.log('📋 [DEVICE] All devices:', Array.from(devices.keys()));
   
   // Notify all viewers about new device
   broadcastToViewers({
@@ -231,9 +264,21 @@ function handleDeviceStopStream(ws, message) {
 
 function handleViewerJoin(ws, message) {
   const viewerId = uuidv4();
+  const { capabilities } = message;
+  
+  console.log('👀 [VIEWER] Viewer join:', {
+    viewerId,
+    capabilities,
+    hasBinaryAudioCapability: capabilities?.supportsBinaryAudio
+  });
+  
+  // Track binary audio support capability
+  const supportsBinary = capabilities?.supportsBinaryAudio || false;
   
   viewers.set(viewerId, {
-    connection: ws
+    connection: ws,
+    supportsBinary: supportsBinary,
+    capabilities: capabilities || {}
   });
   
   // Send current devices to new viewer
@@ -243,7 +288,8 @@ function handleViewerJoin(ws, message) {
     devices: deviceList
   }));
   
-  console.log(`Viewer ${viewerId} joined`);
+  console.log(`📤 Sending DEVICES_LIST to viewer ${viewerId} - Binary audio: ${supportsBinary ? 'SUPPORTED' : 'NOT SUPPORTED'}`);
+  console.log('👥 [VIEWERS] Current viewers:', Array.from(viewers.values()).map(v => ({ supportsBinary: v.supportsBinary })));
 }
 
 function handleViewerLeave(ws, message) {
@@ -317,39 +363,78 @@ function handleIceCandidate(ws, message) {
   }
 }
 
-function handleInternalAudio(ws, message) {
-  const { deviceId, data } = message;
-  console.log('🎵 [SERVER] INTERNAL_AUDIO received from device:', deviceId);
-  console.log('🎵 [SERVER] Audio data keys:', data ? Object.keys(data) : 'NO DATA');
-  console.log('🎵 [SERVER] Viewers count:', viewers.size);
-  
-  const device = devices.get(deviceId);
-  
-  if (!device) {
-    console.warn('❌ [SERVER] Internal audio from unknown device:', deviceId);
-    return;
-  }
-  
-  console.log('✅ [SERVER] Device found, broadcasting to', viewers.size, 'viewers');
-  
-  // Forward internal audio to all viewers watching this device
-  const audioMessage = {
-    type: MessageTypes.INTERNAL_AUDIO,
-    deviceId: deviceId,
-    data: data
-  };
-  
-  let sentCount = 0;
-  viewers.forEach(viewer => {
-    try {
-      viewer.connection.send(JSON.stringify(audioMessage));
-      sentCount++;
-    } catch (error) {
-      console.error('❌ [SERVER] Error sending audio to viewer:', error);
+/**
+ * Handle binary INTERNAL_AUDIO messages
+ * Binary protocol: Version(1) | MessageType(1) | SampleRate(2) | Channels(1) | DeviceIdLen(1) | PayloadLen(4) | Reserved(2) | DeviceId(variable) | AudioData(variable)
+ */
+function handleBinaryInternalAudio(ws, buffer) {
+  try {
+    if (buffer.length < 12) {
+      console.error('❌ [BINARY] Invalid binary message length:', buffer.length);
+      return;
     }
-  });
-  
-  console.log(`✅ [SERVER] Audio broadcast to ${sentCount}/${viewers.size} viewers`);
+    
+    let offset = 0;
+    
+    // Parse header
+    const version = buffer[offset++];
+    const messageType = buffer[offset++];
+    const sampleRate = buffer.readUInt16LE(offset); offset += 2;
+    const channels = buffer[offset++];
+    const deviceIdLen = buffer[offset++];
+    const payloadLen = buffer.readUInt32LE(offset); offset += 4;
+    
+    // Skip reserved bytes
+    offset += 2;
+    
+    if (buffer.length < 12 + deviceIdLen + payloadLen) {
+      console.error('❌ [BINARY] Buffer too short for declared lengths');
+      return;
+    }
+    
+    // Parse device ID
+    const deviceId = buffer.subarray(offset, offset + deviceIdLen).toString('utf8');
+    offset += deviceIdLen;
+    
+    // Parse audio data
+    const audioData = buffer.subarray(offset, offset + payloadLen);
+    
+    const device = devices.get(deviceId);
+    if (!device) {
+      console.warn('❌ [BINARY] Audio from unknown device:', deviceId);
+      return;
+    }
+    
+    // Split viewers by binary capability - optimized for binary-only mode
+    let binaryViewers = 0;
+    let unsupportedViewers = 0;
+    
+    viewers.forEach(viewer => {
+      try {
+        if (viewer.supportsBinary) {
+          // Send binary data directly to binary-capable viewers
+          viewer.connection.send(buffer);
+          binaryViewers++;
+        } else {
+          // Drop audio for non-binary viewers to maintain performance
+          unsupportedViewers++;
+          console.warn('⚠️ [BINARY] Dropping audio for non-binary viewer (performance mode)');
+        }
+      } catch (error) {
+        console.error('❌ [BINARY] Error sending audio to viewer:', error);
+      }
+    });
+    
+    if (unsupportedViewers > 0) {
+      console.warn(`⚠️ [BINARY] ${unsupportedViewers} viewers don't support binary - audio dropped for performance`);
+    }
+    
+    console.log(`✅ [BINARY] High-performance broadcast: ${binaryViewers} binary viewers (${audioData.length} bytes)`);
+    
+    
+  } catch (error) {
+    console.error('❌ [BINARY] Error processing binary audio:', error);
+  }
 }
 
 function handleDeviceScreenInfo(ws, message) {
