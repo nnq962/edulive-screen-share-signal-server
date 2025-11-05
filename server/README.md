@@ -104,7 +104,8 @@ Server xử lý các loại message sau:
 #### Status Updates (Cập nhật trạng thái)
 - `DEVICE_STATUS` - Thông báo trạng thái device
 - `DEVICES_LIST` - Danh sách devices hiện tại
-- `INTERNAL_AUDIO` - Audio nội bộ từ device *(Lưu ý: trong dev.js xử lý như string literal, trong index.js có trong MessageTypes)*
+- `INTERNAL_AUDIO` - Audio nội bộ từ device
+  - *Chi tiết kỹ thuật: `dev.js` xử lý message này dưới dạng string literal `'INTERNAL_AUDIO'` trong switch case, trong khi `index.js` định nghĩa nó trong object `MessageTypes`. Cả hai đều forward audio data từ device đến viewers giống nhau.*
 - `ERROR` - Thông báo lỗi
 
 ### 4. WebRTC Signaling Flow
@@ -174,7 +175,10 @@ Health check endpoint
 #### `GET *` (Production only - index.js)
 Serve frontend React app từ thư mục `dist`
 
-**Lưu ý:** Nếu thư mục `dist` không tồn tại, server sẽ redirect về `http://localhost:3000` (chế độ development)
+**Fallback behavior:**
+- Nếu thư mục `dist` tồn tại: Server sẽ serve file `dist/index.html` cho tất cả non-API routes
+- Nếu không có thư mục `dist`: Server sẽ trả về HTTP 302 redirect đến `http://localhost:3000` (Vite dev server)
+- Implementation: Sử dụng `existsSync('dist')` để kiểm tra và `res.redirect()` cho fallback
 
 ## Luồng hoạt động
 
@@ -240,13 +244,14 @@ Server có logging chi tiết cho debugging:
 
 | Tính năng | dev.js | index.js |
 |-----------|--------|----------|
-| Serve static files | ❌ Không | ✅ Có (từ dist/) hoặc redirect |
+| Serve static files | ❌ Không | ✅ Có (từ dist/) hoặc HTTP 302 redirect |
 | WebSocket Server | ✅ Có | ✅ Có |
-| CORS | localhost:3000, 127.0.0.1:3000 | localhost:3000, 127.0.0.1:3000 |
+| CORS Origins | localhost:3000, 127.0.0.1:3000 | localhost:3000, 127.0.0.1:3000 (giống nhau) |
 | Logging chi tiết | ✅ Nhiều hơn | ✅ Có |
 | Production ready | ❌ Không | ✅ Có |
 | Hot reload | ✅ Dùng với Vite | ❌ Cần rebuild |
-| Fallback behavior | N/A | Redirect to localhost:3000 if no dist/ |
+| Fallback nếu không có dist/ | N/A | Redirect to localhost:3000 |
+| Message Type định nghĩa | Một số dùng string literal | Tất cả trong MessageTypes object |
 
 ## Troubleshooting
 
