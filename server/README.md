@@ -104,7 +104,7 @@ Server xử lý các loại message sau:
 #### Status Updates (Cập nhật trạng thái)
 - `DEVICE_STATUS` - Thông báo trạng thái device
 - `DEVICES_LIST` - Danh sách devices hiện tại
-- `INTERNAL_AUDIO` - Audio nội bộ từ device
+- `INTERNAL_AUDIO` - Audio nội bộ từ device *(Lưu ý: trong dev.js xử lý như string literal, trong index.js có trong MessageTypes)*
 - `ERROR` - Thông báo lỗi
 
 ### 4. WebRTC Signaling Flow
@@ -174,6 +174,8 @@ Health check endpoint
 #### `GET *` (Production only - index.js)
 Serve frontend React app từ thư mục `dist`
 
+**Lưu ý:** Nếu thư mục `dist` không tồn tại, server sẽ redirect về `http://localhost:3000` (chế độ development)
+
 ## Luồng hoạt động
 
 ### Khi Device kết nối:
@@ -238,12 +240,13 @@ Server có logging chi tiết cho debugging:
 
 | Tính năng | dev.js | index.js |
 |-----------|--------|----------|
-| Serve static files | ❌ Không | ✅ Có (từ dist/) |
+| Serve static files | ❌ Không | ✅ Có (từ dist/) hoặc redirect |
 | WebSocket Server | ✅ Có | ✅ Có |
-| CORS | localhost:3000 | localhost:3000 |
+| CORS | localhost:3000, 127.0.0.1:3000 | localhost:3000, 127.0.0.1:3000 |
 | Logging chi tiết | ✅ Nhiều hơn | ✅ Có |
 | Production ready | ❌ Không | ✅ Có |
 | Hot reload | ✅ Dùng với Vite | ❌ Cần rebuild |
+| Fallback behavior | N/A | Redirect to localhost:3000 if no dist/ |
 
 ## Troubleshooting
 
